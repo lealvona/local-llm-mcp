@@ -168,3 +168,8 @@ def test_env_file_seeds_without_overriding(tmp_path, monkeypatch):
     assert os.environ["LOCAL_LLM_MCP_MODEL"] == "m1"
     assert os.environ["LOCAL_LLM_MCP_MODE"] == "assist"
     assert os.environ["LOCAL_LLM_MCP_STATE_DIR"] == os.path.expandvars("$HOME/x")
+
+
+def test_assignment_value_that_is_a_variable_name_is_a_label(scrubber, vault):
+    assert scrubber.scrub("SECRET: TELEGRAM_BOT_TOKEN\nCONFIG: OPENAI_BASE_URL", vault, secrets_only=True).replaced == 0
+    assert scrubber.scrub("password: HUNTER2X", vault, secrets_only=True).replaced == 1  # gitleaks:allow

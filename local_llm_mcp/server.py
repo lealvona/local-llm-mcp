@@ -428,7 +428,7 @@ def build(cfg: Config) -> FastMCP:
         previous = a.mode
         a.session.set_mode(mode)
         a.session.append_turn({"kind": "mode", "task": f"mode {previous} -> {mode}", "result": "", "mode": mode})
-        a.registrar.event("session", "mode_change", {"from": previous, "to": mode, "session": a.session.key})
+        a.observer.event("session", "mode_change", {"from": previous, "to": mode, "session": a.session.key})
         return f"Mode is now {mode} (was {previous}).\n\n" + prompts.client_instructions(mode, cfg.model, cfg.base_url)
 
     return mcp

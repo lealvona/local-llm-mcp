@@ -112,11 +112,16 @@ def _looks_secret(value: str) -> bool:
     return len(v) >= 12 or bool(re.search(r"[0-9_\-+/=@#$%^&*!]", v))
 
 
+_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+
+
 def _is_reference(value: str) -> bool:
     v = value.strip("'\"`,;)")
     low = v.lower()
     if low in _NOT_A_VALUE:
         return True
+    if _ENV_NAME_RE.fullmatch(v):
+        return True  # "SECRET: TELEGRAM_BOT_TOKEN" names a variable; it is not its value
     if v.startswith(_REFERENCE_PREFIXES) or re.match(r"^[A-Za-z]:[\\/]", v):
         return True
     if PLACEHOLDER_RE.fullmatch(v):
