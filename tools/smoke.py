@@ -145,6 +145,30 @@ async def main() -> int:
             print(f"[continuity {time.monotonic()-t0:.1f}s]\n{out}\n")
             check("4411" in out and "2026-09-12" in out, "continuity across compaction")
 
+            # verbatim: the worker locates, the server quotes exactly
+            src = Path(state) / "sample_module.py"
+            body = ["import os", "", "def helper(x):", "    return x + 1", ""] + [f"# filler line {i}" for i in range(120)] + [
+                "def target_function(a, b):", "    \"\"\"Adds with a twist.\"\"\"", "    total = a + b  # exact-marker-7731",
+                "    if total > 10:", "        return total * 2", "    return total", ""] + [f"# more filler {i}" for i in range(60)]
+            src.write_text("\n".join(body))
+            t0 = time.monotonic()
+            out = text(await s.call_tool("local_llm_delegate", {
+                "task": "The complete definition of target_function, nothing else.", "paths": [str(src)], "verbatim": True}))
+            print(f"[verbatim {time.monotonic()-t0:.1f}s]\n{out}\n")
+            check("def target_function(a, b):" in out and "exact-marker-7731" in out and "return total * 2" in out,
+                  "verbatim mode quoted the function exactly")
+            check("def helper" not in out and "filler line 3" not in out, "verbatim mode left unrelated lines out")
+            m = re.search(r"ref (a_[0-9a-f]{8})", out)
+            if m:
+                out2 = text(await s.call_tool("local_llm_artifact", {"ref": m.group(1), "line_start": 3, "line_end": 4}))
+                check("3: def helper(x):" in out2 and "4:     return x + 1" in out2, "artifact line slicing is exact")
+            t0 = time.monotonic()
+            out = text(await s.call_tool("local_llm_delegate", {
+                "task": "How many lines does the command print, and what is on the last line? Answer in one line.",
+                "command": "printf 'alpha\\nbeta\\ngamma\\n'"}))
+            print(f"[delegate+command {time.monotonic()-t0:.1f}s]\n{out}\n")
+            check("gamma" in out and "rc 0" in out, "delegate accepts a command as material")
+
             out = text(await s.call_tool("local_llm_set_mode", {"mode": "assist"}))
             check("ACTIVE MODE: ASSIST" in out, "mode switch returns the new instructions")
             res = ctl(before["control_socket"], {"op": "status"})

@@ -71,6 +71,13 @@ package.
 Every value that goes **to** the worker or the shell is rehydrated; every value that
 **leaves** the server is scrubbed. That asymmetry is the whole design.
 
+There is a second path beside the digest: **verbatim mode**. A digest paraphrases, and a
+caller that needs code or configuration text cannot act on a paraphrase. With
+`verbatim=true` the worker is shown numbered lines and asked only *which line ranges* the
+task refers to; the server then copies those lines out of the material exactly (still
+scrubbed on the way out). The model's judgement chooses the region; it never rewrites a
+character of it.
+
 ## The two modes and when the caller calls
 
 The server tells the caller, in its MCP `instructions` (returned at initialize and
@@ -111,29 +118,37 @@ output capped) and receive a digest of its output. Raw output is kept as an arti
 | `cwd` | string | server cwd | working directory |
 | `timeout_s` | int | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | kill after |
 | `max_output_chars` | int | `LOCAL_LLM_MCP_MAX_OUTPUT_CHARS` | soft digest budget |
+| `verbatim` | bool | `false` | quote the relevant output lines exactly instead of digesting |
 
 A timeout or non-zero exit is reported inside the digest and in the trailer.
 
 ### `local_llm_delegate`
 
-Hand a task to the worker with inline material and/or file paths (directories are
-listed; `~` expands; missing or unreadable paths are reported inline).
+Hand a task to the worker over material you name: inline text, files or directories
+(listed; `~` expands; missing or unreadable paths are reported inline), and/or the output
+of a shell command.
 
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `task` | string | required | what to do — what to extract, thresholds, output shape |
 | `material` | string | `""` | inline text |
 | `paths` | list[string] | `[]` | files or directories to read |
-| `cwd` | string | `""` | base for relative paths |
+| `command` | string | `""` | shell command whose output is added to the material |
+| `cwd` | string | `""` | base for relative paths and the command |
 | `max_output_chars` | int | server default | soft answer budget |
+| `verbatim` | bool | `false` | quote the relevant lines exactly instead of answering in prose |
 
-Without material the worker answers from the task and its session memory.
+Without material the worker answers from the task and its session memory. In verbatim
+mode the result is one or more `source lines a-b:` blocks with numbered lines; ranges
+that did not fit the budget are named in the trailer so you can fetch them with
+`local_llm_artifact`.
 
 ### `local_llm_artifact`
 
-Return a slice of a stored raw output by ref, scrubbed (fully in PII mode, secrets
-only in ASSIST mode). `ref` (`a_xxxxxxxx`), `offset` (default 0), `limit` (default
-4000, max 20000). The trailer says whether more remains.
+Return an exact slice of a stored raw output by ref, scrubbed (fully in PII mode,
+secrets only in ASSIST mode). Line mode: `line_start` / `line_end` (1-based, inclusive,
+numbered output; `line_end` defaults to 200 lines). Character mode: `offset` / `limit`
+(default 4000, max 20000). The trailer says where the next slice starts.
 
 ### `local_llm_status`
 
@@ -423,7 +438,7 @@ Sessions are never deleted automatically; `rm -r` a session directory to forget 
 
 ```bash
 uv sync
-.venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration
+.venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration, verbatim helpers
 .venv/bin/python tools/smoke.py                      # end to end over stdio against your configured model
 .venv/bin/python tools/leakcheck.py ~/.secrets/app.env   # a REAL secrets file through PII mode; asserts no value leaks
 ```
@@ -432,7 +447,9 @@ The smoke client exercises: initialize (instructions carry the mode), tool listi
 status, a calculation, a command digest, a PII delegation (the email and password
 never come back), placeholder rehydration through a shell command (an uppercased echo
 comes back re-scrubbed), artifact slicing, compaction over the control socket exactly
-as the hook does it, recall of a fact after compaction, and a mode switch.
+as the hook does it, recall of a fact after compaction, verbatim quoting of a function out
+of a 190-line file, line-mode artifact slicing, a command supplied to delegate, and a mode
+switch.
 
 `leakcheck.py` reads a file you name only to build the list of values to guard, runs
 a fresh PII-mode server against it, and prints the digest only if none of those values
@@ -485,6 +502,11 @@ observer traffic.
 address `[EMAIL-1]`, compare `[PERSON-1]` and `[PERSON-2]`, and pass `[SECRET-1]` into
 a command — all without holding the value. Referential integrity survives
 sanitization.
+
+**When should I use verbatim mode?** Whenever you will *reproduce* the text rather than
+act on a summary of it: a function to copy, a config block to edit, an error to quote. The
+worker only chooses the lines; the bytes come from the source. A digest is for when you
+need to know what something says; verbatim is for when you need to have it.
 
 **Why does the worker get its own memory instead of the caller's?** The caller's
 context is what we are trying to keep small and clean. The worker's memory is local,

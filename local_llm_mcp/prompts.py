@@ -116,6 +116,18 @@ def parse_entities(text: str) -> list[dict]:
     return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
+# Verbatim mode: the worker only LOCATES; the server quotes exactly (see verbatim.py).
+LOCATE_SYSTEM = """You locate text. You are given numbered lines of material and a TASK. Output ONLY a JSON array of [start, end] inclusive line-number pairs covering exactly the lines the TASK asks for — always a list of pairs, e.g. [[127, 132]] for one range or [[3, 9], [40, 52]] for two. Include whole logical units (a complete function, block, table, section, or record), never a fragment of one. Prefer few precise ranges over many; skip anything the TASK does not ask for. If nothing matches, output []. No commentary, no markdown fence."""
+
+LOCATE_USER = """TASK: {task}
+
+MATERIAL (source: {source}; lines {first}-{last} of {total}):
+<<<LINES
+{numbered}
+LINES>>>
+
+JSON array of [start, end] pairs now."""
+
 DEFAULT_RUN_TASK = ("Report this command's output for a caller who cannot see it: what the command did, whether it "
                     "succeeded, every error or warning verbatim, and the key lines/values the caller needs. "
                     "Keep exact paths, names and numbers.")
@@ -162,9 +174,9 @@ def compaction_prompts(mode: str, summary: str, turns_text: str, summary_chars: 
 
 CLIENT_PII = """ACTIVE MODE: PII. Route through this server EVERY step that might touch private information: operator names, home/postal addresses, phone numbers, personal email, family details, account/card/bank numbers, credentials, API keys, tokens, vault contents, .env/.secrets/.ssh files, password or key prompts, personal mail/messages/contacts/calendars. Do not cat/grep/open such material yourself or run commands that would print it: describe the job to local_llm_delegate (paths, inline text) or local_llm_run (a command) and act on the sanitized result. The worker sees the real data; you only ever receive placeholders; secrets are used server-side and never returned. Work directly on anything with no private data. When unsure, delegate."""
 
-CLIENT_ASSIST = """ACTIVE MODE: ASSIST. Delegate OFTEN: every step that needs no conversational context and whose raw output would exceed the digest you need. Rule of thumb: a direct call returning more than ~40 lines / 2 KB goes here instead. local_llm_run replaces your shell tool for logs, journals, test/build/lint runs, listings, git log/diff/status, grep/find results, package/process lists, systemctl/docker output, API responses, long dumps. local_llm_delegate for file reads/summaries, research over material, calculations, transformations, parsing, boilerplate. Do NOT delegate what prints little or nothing (mkdir, cp, mv, rm, touch, chmod, one-line checks), files under ~40 lines, edits, or anything needing exact raw bytes (use local_llm_artifact on the ref instead). Exact counts/sorts/sums: compute in the command (wc, sort -n, awk, jq); the worker digests, it does not compute over long lists."""
+CLIENT_ASSIST = """ACTIVE MODE: ASSIST. Delegate OFTEN: every step that needs no conversational context and whose raw output would exceed the digest you need. Rule of thumb: a direct call returning more than ~40 lines / 2 KB goes here instead. local_llm_run replaces your shell tool for logs, journals, test/build/lint runs, listings, git log/diff/status, grep/find results, package/process lists, systemctl/docker output, API responses, long dumps. local_llm_delegate for file reads/summaries, research over material, calculations, transformations, parsing, boilerplate. Do NOT delegate what prints little or nothing (mkdir, cp, mv, rm, touch, chmod, one-line checks), files under ~40 lines, or edits. For exact text use verbatim=true or local_llm_artifact, not your own reader. Exact counts/sorts/sums: compute in the command (wc, sort -n, awk, jq); the worker digests, it does not compute over long lists."""
 
-CLIENT_COMMON = """local-llm-mcp: a worker model on the LAN ({model}) with its OWN running memory of this conversation — compacted by the worker whenever yours is (PreCompact hook) and when it grows large; you never manage it. Tools: local_llm_run (command → digest; raw output kept as an artifact), local_llm_delegate (task + inline material/paths), local_llm_artifact (slice of a raw output by ref a_…), local_llm_status, local_llm_compact, local_llm_set_mode. Results end with a trailer (turn, ref, rc, raw size, model, seconds, scrubs). Placeholders like [EMAIL-1]/[SECRET-2] are stable all conversation and are re-expanded server-side when you use them in a later task or command; never ask what one stands for. Write tasks precisely (what to extract, thresholds, output shape): the worker answers for a caller who cannot see the material."""
+CLIENT_COMMON = """local-llm-mcp: a worker model on the LAN ({model}) with its OWN running memory of this conversation — compacted by the worker whenever yours is (PreCompact hook) and when it grows large; you never manage it. Tools: local_llm_run(command, task?, verbatim?) → digest of the output; local_llm_delegate(task, material?, paths?, command?, verbatim?) → answer over files/text/command output; local_llm_artifact(ref, line_start?/line_end? or offset?/limit?) → exact slice of a stored raw output; local_llm_status, local_llm_compact, local_llm_set_mode. verbatim=true: the worker only LOCATES the relevant line ranges and the server quotes them exactly — use it whenever you need code or config text, not a paraphrase. Results end with a trailer (turn, ref, rc, raw size, model, seconds, scrubs). Placeholders like [EMAIL-1]/[SECRET-2] are stable all conversation and are re-expanded server-side when you use them in a later task or command; never ask what one stands for. Write tasks precisely (what to extract, thresholds, output shape): the worker answers for a caller who cannot see the material."""
 
 
 def client_instructions(mode: str, model: str, endpoint: str) -> str:

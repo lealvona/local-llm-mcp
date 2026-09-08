@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, AsyncIterator
@@ -27,6 +29,7 @@ from .material import cap, read_paths, run_command
 from .observers import load_observer
 from .scrub import ScrubResult, Scrubber
 from .session import Session
+from . import verbatim as vb
 
 log = logging.getLogger("local_llm_mcp.server")
 
@@ -63,8 +66,33 @@ class App:
     def _trailer(parts: list[str]) -> str:
         return "\n\n— local-llm · " + " · ".join(p for p in parts if p)
 
+    async def locate_and_quote(self, task: str, material: str, source: str, max_output_chars: int) -> tuple[str, list]:
+        """Verbatim mode: ask the worker for line ranges per chunk, quote them exactly."""
+        lines = material.split("\n")
+        total = len(lines)
+        windows = vb.chunk_lines(lines, self.cfg.chunk_chars)
+        sem = asyncio.Semaphore(self.cfg.parallel_chunks)
+
+        async def one(a: int, b: int) -> list[tuple[int, int]]:
+            if b <= a:
+                return []
+            async with sem:
+                numbered = vb.number_lines(lines[a:b], a + 1)
+                text, _u = await self.llm.chat(prompts.LOCATE_SYSTEM, prompts.LOCATE_USER.format(
+                    task=task, source=source, first=a + 1, last=b, total=total, numbered=numbered),
+                    max_tokens=1024, temperature=0.0)
+                return vb.parse_ranges(text, total)
+
+        found = await asyncio.gather(*(one(a, b) for a, b in windows))
+        ranges = vb.merge_ranges([r for part in found for r in part], total)
+        if not ranges:
+            return "(no lines matched the task)", []
+        label = source if not source.startswith(("paths:", "inline")) and ";" not in source else f"combined material ({source})"
+        text, left = vb.quote(lines, ranges, label, max_output_chars)
+        return text, left
+
     async def delegate(self, *, kind: str, task: str, material: str, source: str,
-                       max_output_chars: int, extra: dict | None = None) -> str:
+                       max_output_chars: int, extra: dict | None = None, verbatim: bool = False) -> str:
         t0 = time.monotonic()
         mode = self.mode
         extra = extra or {}
@@ -82,12 +110,17 @@ class App:
             answer = ""
             usage = None
             finalized = False
+            left_out: list = []
             try:
-                answer, usage = await self.llm.digest(
-                    system, self.inbound(task), material, source,
-                    max_output_chars=max_output_chars,
-                    render_user=prompts.render_user, render_reduce=prompts.render_reduce)
-                if prompts.needs_finalize(answer):
+                if verbatim and material:
+                    answer, left_out = await self.locate_and_quote(self.inbound(task), material, source, max_output_chars)
+                    usage = None
+                else:
+                    answer, usage = await self.llm.digest(
+                        system, self.inbound(task), material, source,
+                        max_output_chars=max_output_chars,
+                        render_user=prompts.render_user, render_reduce=prompts.render_reduce)
+                if not verbatim and prompts.needs_finalize(answer):
                     final, u2 = await self.llm.chat(
                         system, prompts.render_finalize(self.inbound(task), answer, max_output_chars),
                         max_tokens=self.llm.tokens_for(max_output_chars), temperature=0.1)
@@ -105,6 +138,7 @@ class App:
             excerpt = self.outbound(material[:self.cfg.excerpt_chars]).text if material else ""
             turn = {
                 "kind": kind, "mode": mode, "task": task[:2000], "source": source[:300], "excerpt": excerpt,
+                "verbatim": verbatim,
                 "result": scrubbed.text[:6000] if not error else f"ERROR: {error[:500]}",
                 "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text), "secs": secs,
                 "model": self.cfg.model, **extra,
@@ -114,7 +148,7 @@ class App:
                 "mode": mode, "turn": tid, "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text),
                 "secs": secs, "model": self.cfg.model, "rc": extra.get("rc"), "error": bool(error),
                 "scrubbed": scrubbed.replaced, "chunks": getattr(usage, "chunks", 1) if usage else 0,
-                "finalized": finalized, "entities": entities, "session": self.session.key,
+                "finalized": finalized, "entities": entities, "verbatim": verbatim, "session": self.session.key,
             })
             if error:
                 trailer = self._trailer([mode, f"turn {tid}", f"ref {ref}" if ref else "", f"{secs}s"])
@@ -125,6 +159,7 @@ class App:
                 f"raw {len(material)} chars" + (" (truncated)" if extra.get("truncated") else "") if material else "no material",
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
+                ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
                 self.cfg.model, f"{secs}s", scrubbed.trailer(),
             ])
             result = scrubbed.text + trailer
@@ -234,6 +269,11 @@ class App:
                 pass
 
 
+def _short_path(p: str, keep: int = 96) -> str:
+    """Show a path whole when it fits, else its tail (the name is what the caller needs)."""
+    return p if len(p) <= keep else "…/" + "/".join(p.rstrip("/").split("/")[-2:])
+
+
 APP: App | None = None
 
 
@@ -302,6 +342,7 @@ def build(cfg: Config) -> FastMCP:
         cwd: Annotated[str, Field(description="Working directory for the command. Default: the server's own cwd.")] = "",
         timeout_s: Annotated[int, Field(ge=0, le=3600, description="Kill the command after this many seconds (0 = server default).")] = 0,
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the digest (0 = server default).")] = 0,
+        verbatim: Annotated[bool, Field(description="Quote the relevant output lines EXACTLY (the worker only locates them) instead of digesting. Use for code, config, or anything you must reproduce.")] = False,
     ) -> str:
         a = _app()
         res = await run_command(a.inbound(command), cwd=cwd or None,
@@ -315,7 +356,7 @@ def build(cfg: Config) -> FastMCP:
         if not material.strip():
             material = f"(no output; exit code {res.rc}{', timed out' if res.timed_out else ''})"
         return await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
-                                max_output_chars=_budget(max_output_chars),
+                                max_output_chars=_budget(max_output_chars), verbatim=verbatim,
                                 extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
                                        "cmd_secs": res.secs})
 
@@ -323,11 +364,13 @@ def build(cfg: Config) -> FastMCP:
         name="local_llm_delegate",
         title="Delegate a task with inline material and/or files",
         description=(
-            "Hand a task to the local worker model with optional inline material and/or file paths it should read "
-            "(directories are listed). Use for reading or summarizing files and documents, research and synthesis over "
-            "provided text, calculations, format transformations, parsing, boilerplate drafting, and — in PII mode — "
-            "anything that touches private data (the worker reads it; you receive placeholders). The worker also "
-            "carries its own running memory of this conversation, so follow-up tasks can refer to earlier results "
+            "Hand a task to the local worker model over material you name: inline text (material), files or "
+            "directories to read (paths; directories are listed), and/or the output of a shell command (command). "
+            "Use for reading or summarizing files and documents, research and synthesis over provided text, "
+            "calculations, format transformations, parsing, boilerplate drafting, and — in PII mode — anything that "
+            "touches private data (the worker reads it; you receive placeholders). Set verbatim=true when you need the "
+            "relevant lines EXACTLY (code, config): the worker only locates them and the server quotes them. The worker "
+            "also carries its own running memory of this conversation, so follow-up tasks can refer to earlier results "
             "by turn id (t_xxxxxx) or artifact ref (a_xxxxxxxx)."),
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False),
     )
@@ -335,42 +378,79 @@ def build(cfg: Config) -> FastMCP:
         task: Annotated[str, Field(min_length=1, description="What to do, precisely: what to extract, what to report, thresholds, output shape.")],
         material: Annotated[str, Field(description="Inline text to work on (pasted output, a document, data). Optional.")] = "",
         paths: Annotated[list[str], Field(description="Files or directories to read as material (~ expands). Optional.")] = [],
-        cwd: Annotated[str, Field(description="Base directory for relative paths.")] = "",
+        command: Annotated[str, Field(description="Shell command whose output is added to the material (bash -c; placeholders expanded server-side). Optional.")] = "",
+        cwd: Annotated[str, Field(description="Base directory for relative paths and the command.")] = "",
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the answer (0 = server default).")] = 0,
+        verbatim: Annotated[bool, Field(description="Quote the relevant lines EXACTLY (the worker only locates them) instead of answering in prose.")] = False,
     ) -> str:
         a = _app()
         pieces: list[str] = []
         sources: list[str] = []
+        extra: dict = {}
         if material:
             pieces.append(material)
             sources.append(f"inline ({len(material)} chars)")
+        if command:
+            res = await run_command(a.inbound(command), cwd=cwd or None, timeout=cfg.command_timeout,
+                                    max_chars=cfg.material_max_chars)
+            pieces.append(f"### COMMAND: {command}\n### exit code: {res.rc}{' (timed out)' if res.timed_out else ''}\n"
+                          + (res.output or "(no output)"))
+            sources.append(f"command: {command[:120]}")
+            extra.update({"rc": res.rc, "timed_out": res.timed_out, "cmd_secs": res.secs})
         if paths:
-            text, meta = read_paths([a.inbound(p) for p in paths], max_chars=cfg.material_max_chars, cwd=cwd or None)
-            pieces.append(text)
-            sources.append("paths: " + ", ".join(p[:80] for p in paths[:8]) + (" …" if len(paths) > 8 else ""))
+            expanded = [a.inbound(p) for p in paths]
+            single = Path(os.path.expanduser(expanded[0])) if len(expanded) == 1 else None
+            if single is not None and not single.is_absolute() and cwd:
+                single = Path(cwd) / single
+            if verbatim and not pieces and single is not None and single.is_file():
+                # One file, verbatim: quote it by ITS OWN line numbers — no header, no
+                # concatenation — so a quoted range is a range the caller can edit.
+                raw = single.read_bytes().decode("utf-8", "replace")
+                text, truncated_file = cap(raw, cfg.material_max_chars)
+                pieces.append(text)
+                sources.append(_short_path(str(single)))
+                if truncated_file:
+                    extra["truncated"] = True
+            else:
+                text, meta = read_paths(expanded, max_chars=cfg.material_max_chars, cwd=cwd or None)
+                pieces.append(text)
+                sources.append("paths: " + ", ".join(_short_path(p) for p in expanded[:8]) + (" …" if len(expanded) > 8 else ""))
         joined = "\n\n".join(pieces)
         joined, truncated = cap(joined, cfg.material_max_chars)
+        if truncated:
+            extra["truncated"] = True
         return await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
-                                max_output_chars=_budget(max_output_chars), extra={"truncated": truncated} if truncated else {})
+                                max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim)
 
     @mcp.tool(
         name="local_llm_artifact",
         title="Read a slice of a stored raw output",
         description=(
-            "Return a slice of the raw material behind an earlier result, by its artifact ref (a_xxxxxxxx from a "
-            "trailer). Use when the digest left out something you need exactly. In PII mode the slice is scrubbed "
-            "(placeholders); in ASSIST mode only secrets are scrubbed. Paginate with offset/limit."),
+            "Return an exact slice of the raw material behind an earlier result, by its artifact ref (a_xxxxxxxx from a "
+            "trailer): by line (line_start/line_end, numbered) or by character (offset/limit). Use when the digest left "
+            "out something you need exactly. In PII mode the slice is scrubbed (placeholders); in ASSIST mode only "
+            "secrets are scrubbed."),
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
     async def local_llm_artifact(
         ref: Annotated[str, Field(pattern=r"^a_[0-9a-f]{8}$", description="Artifact ref from a result trailer, e.g. a_1f2e3d4c.")],
-        offset: Annotated[int, Field(ge=0, description="Character offset to start from.")] = 0,
-        limit: Annotated[int, Field(ge=100, le=20000, description="Maximum characters to return.")] = 4000,
+        offset: Annotated[int, Field(ge=0, description="Character offset to start from (character mode).")] = 0,
+        limit: Annotated[int, Field(ge=100, le=20000, description="Maximum characters to return (character mode).")] = 4000,
+        line_start: Annotated[int, Field(ge=0, description="First line to return, 1-based (line mode; 0 = character mode).")] = 0,
+        line_end: Annotated[int, Field(ge=0, description="Last line to return, inclusive (0 = line_start + 199).")] = 0,
     ) -> str:
         a = _app()
         raw = a.session.read_artifact(ref)
         if raw is None:
             return f"Error: no artifact {ref} in this session (refs are per conversation; see local_llm_status)."
+        if line_start > 0:
+            lines = raw.split("\n")
+            end = min(len(lines), line_end or line_start + 199)
+            piece = vb.number_lines(lines[line_start - 1:end], line_start) if line_start <= len(lines) else ""
+            scrubbed = a.outbound(piece)
+            trailer = App._trailer([f"artifact {ref}", f"lines {line_start}-{end} of {len(lines)}",
+                                    f"next line {end + 1}" if end < len(lines) else "end", scrubbed.trailer()])
+            return scrubbed.text + trailer
         piece = raw[offset:offset + limit]
         scrubbed = a.outbound(piece)
         has_more = offset + limit < len(raw)
