@@ -231,3 +231,9 @@ def test_identity_shapes_pii_mode_only_and_switchable(terms, vault):
     assert on.scrub(text, vault).kinds == {"PERSON": 1, "ADDRESS": 1}   # PII mode
     off = Scrubber(None, terms, shapes=False)
     assert off.scrub(text, Vault(vault.path.parent / "v2.json")).replaced == 0
+
+
+def test_nested_placeholder_from_a_worker_collapses(scrubber, vault):
+    r = scrubber.scrub("card: [CARD-4111 1111 1111 1111] and again [CARD-4111 1111 1111 1111]", vault)
+    assert r.text == "card: [CARD-1] and again [CARD-1]" and r.kinds == {"CARD": 2}
+    assert scrubber.scrub("[PERSON-[PERSON-3]] said hi", vault).text == "[PERSON-3] said hi"

@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Config
+from .disclosure import Disclosure
 from .scrub import Vault
 
 log = logging.getLogger("local_llm_mcp.session")
@@ -187,6 +188,15 @@ class Session:
 
     def set_mode(self, mode: str) -> None:
         self.meta["mode"] = mode
+        self._save_meta()
+
+    @property
+    def disclosure(self) -> Disclosure:
+        """This session's disclosure state (a fresh object each time; write back with set_disclosure)."""
+        return Disclosure.from_meta(self.meta, self.cfg.assist_numbers)
+
+    def set_disclosure(self, d: Disclosure) -> None:
+        self.meta["disclosure"] = d.to_meta()
         self._save_meta()
 
     def refresh_identity(self) -> bool:

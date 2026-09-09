@@ -17,18 +17,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, AsyncIterator
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import prompts
 from . import savings as sv
 from .config import MODES, Config
+from .disclosure import CHOICES, DisclosureChoice, detected_tiers, dialog_message, found_text
 from .control import socket_path, start as start_control
 from .llm import LLMError, LocalLLM
 from .material import cap, read_paths, run_command
 from .observers import load_observer
-from .scrub import ScrubResult, Scrubber
+from .scrub import Policy, ScrubResult, Scrubber
 from .session import Session
 from . import verbatim as vb
 
@@ -56,9 +57,85 @@ class App:
     def mode(self) -> str:
         return self.session.mode
 
-    def outbound(self, text: str) -> ScrubResult:
+    def policy(self) -> Policy:
+        """What may leave in clear right now: the mode plus this session's disclosure state."""
+        return self.session.disclosure.policy(self.mode)
+
+    def outbound(self, text: str, policy: Policy | None = None) -> ScrubResult:
         """Everything that leaves the server passes through here."""
-        return self.scrubber.scrub(text, self.session.vault, secrets_only=(self.mode != "pii"))
+        return self.scrubber.scrub(text, self.session.vault, policy=policy or self.policy())
+
+    def vault_memory(self) -> int:
+        """When a session moves to PII mode (or identity values get masked): values already
+        written into its memory under the old policy get vaulted, so they leave masked from
+        now on. Returns how many distinct values were registered."""
+        turns = self.session.turns()
+        texts = [self.session.summary()] + [str(t.get("excerpt") or "") for t in turns] + [str(t.get("result") or "") for t in turns]
+        counts = self.scrubber.register_material("\n".join(texts), self.session.vault, policy=Policy.register(entropy=False))
+        return sum(counts.values())
+
+    @staticmethod
+    def client_can_ask(ctx: Context | None) -> bool:
+        """Did the client declare the elicitation capability (it can show the user a dialog)?"""
+        try:
+            params = ctx.session.client_params if ctx is not None else None
+            return bool(params and params.capabilities and params.capabilities.elicitation is not None)
+        except Exception:
+            return False
+
+    async def decide(self, ctx: Context | None, counts: dict, source: str) -> tuple[Policy | None, str, str]:
+        """First identity/number values in an ASSIST session. Ask the human when the client can
+        show a dialog (the worker keeps working meanwhile), else apply the escalation policy.
+        Returns (policy override for THIS turn or None, notice for the caller, trailer label)."""
+        d = self.session.disclosure
+        found = found_text(counts)
+        esc = self.cfg.escalation
+        if esc == "off":
+            d.set(identity="open", source="policy")
+            self.session.set_disclosure(d)
+            self.observer.event("session", "disclosure", {"decision": "open", "source": "policy", "session": self.session.key})
+            return None, "", "identity open (policy)"
+        if esc == "auto" or not self.client_can_ask(ctx) or d.asked >= 3:
+            d.set(identity="masked", source="auto")
+            self.session.set_disclosure(d)
+            self.observer.event("session", "disclosure", {"decision": "masked", "source": "auto", "session": self.session.key})
+            return None, (f"[local-llm-mcp] Personal data found ({found}) and masked: in this ASSIST session secrets, "
+                          "account/id numbers and identity values (names, addresses, emails, phones) come back as "
+                          "placeholders. If the user wants identity values shown, call local_llm_disclosure(identity='open'); "
+                          "for numbers too, numbers='open'; or switch to PII mode."), "masked (auto)"
+        d.asked += 1
+        self.session.set_disclosure(d)
+        action, choice = "error", ""
+        try:
+            res = await asyncio.wait_for(ctx.elicit(dialog_message(counts, source), DisclosureChoice),
+                                         timeout=self.cfg.dialog_timeout)
+            action = str(res.action)
+            if action == "accept" and res.data is not None:
+                choice = str(res.data.choice or "").strip().lower()
+        except asyncio.TimeoutError:
+            action = "timeout"
+        except Exception as exc:
+            log.warning("disclosure dialog failed: %s", exc)
+        if action != "accept" or choice not in CHOICES:
+            self.observer.event("session", "disclosure", {"decision": "none", "source": action, "session": self.session.key})
+            return Policy.assist(False, False), (f"[local-llm-mcp] The user did not answer the disclosure dialog ({action}); "
+                                                 "this result is masked. The dialog is shown again the next time personal "
+                                                 "data appears."), f"dialog {action}: masked"
+        switched = d.apply(choice, source="dialog")
+        self.session.set_disclosure(d)
+        self.observer.event("session", "disclosure", {"decision": choice, "source": "dialog", "session": self.session.key})
+        if switched:
+            self.session.set_mode("pii")
+            self.vault_memory()
+            self.observer.event("session", "mode_change", {"from": "assist", "to": "pii", "session": self.session.key})
+            return Policy.everything(), ("[local-llm-mcp] The user switched this session to PII mode: every private value is a "
+                                         "placeholder from now on, including this result. New instructions:\n"
+                                         + prompts.client_instructions("pii", self.cfg.model, self.cfg.base_url)), "asked → switched to PII"
+        if choice == "continue":
+            return None, ("[local-llm-mcp] The user chose to continue in ASSIST: identity values (names, addresses, emails, "
+                          "phones) are shown; secrets, account/card/id numbers and dates of birth stay masked."), "asked → continue"
+        return None, ("[local-llm-mcp] The user chose to continue in ASSIST and show everything except secrets: identity "
+                      "values and account/card/id numbers pass in clear."), "asked → everything"
 
     def inbound(self, text: str) -> str:
         """Everything that goes to the worker or the shell passes through here."""
@@ -137,7 +214,8 @@ class App:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def delegate(self, *, kind: str, task: str, material: str, source: str,
-                       max_output_chars: int, extra: dict | None = None, verbatim: bool = False) -> str:
+                       max_output_chars: int, extra: dict | None = None, verbatim: bool = False,
+                       ctx: Context | None = None) -> str:
         t0 = time.monotonic()
         mode = self.mode
         extra = dict(extra or {})
@@ -145,10 +223,12 @@ class App:
         if gathered_text is None:
             gathered_text = material if kind == "run" else ""
         async with self.lock:
-            # Everything detectable in the material gets a placeholder BEFORE the
-            # worker sees it, so an exact echo in the answer is caught even
-            # when the answer's own context would not have matched a rule.
-            self.scrubber.register_material(material, self.session.vault, secrets_only=(mode != "pii"))
+            # EVERYTHING detectable in the material gets a placeholder BEFORE the worker
+            # sees it, whatever the mode: the vault is local, an exact echo in the answer
+            # is then caught in any context, and a later switch to PII is retroactive.
+            # Only the high-entropy rule is PII-mode-only (ASSIST digests keep SHAs exact).
+            counts = self.scrubber.register_material(material, self.session.vault,
+                                                     policy=Policy.register(entropy=(mode == "pii")))
             entities = 0
             if mode == "pii" and material and self.cfg.entity_pass:
                 entities = await self.entity_pass(material)
@@ -159,15 +239,29 @@ class App:
             usage = None
             finalized = False
             left_out: list = []
+            # The worker starts now; a disclosure dialog, if one is due, runs while it works.
+            if verbatim and material:
+                work = asyncio.ensure_future(self.locate_and_quote(self.inbound(task), material, source, max_output_chars))
+            else:
+                work = asyncio.ensure_future(self.llm.digest(
+                    system, self.inbound(task), material, source,
+                    max_output_chars=max_output_chars,
+                    render_user=prompts.render_user, render_reduce=prompts.render_reduce))
+            override: Policy | None = None
+            notice = ""
+            decision = ""
+            if mode == "assist" and detected_tiers(counts) and self.session.disclosure.identity == "undecided":
+                try:
+                    override, notice, decision = await self.decide(ctx, counts, source)
+                except Exception as exc:  # never lose the worker's answer to bookkeeping
+                    log.warning("disclosure decision failed: %s", exc)
+                mode = self.mode  # a switch to PII lands here
             try:
                 if verbatim and material:
-                    answer, left_out = await self.locate_and_quote(self.inbound(task), material, source, max_output_chars)
+                    answer, left_out = await work
                     usage = None
                 else:
-                    answer, usage = await self.llm.digest(
-                        system, self.inbound(task), material, source,
-                        max_output_chars=max_output_chars,
-                        render_user=prompts.render_user, render_reduce=prompts.render_reduce)
+                    answer, usage = await work
                 if not verbatim and prompts.needs_finalize(answer):
                     final, u2 = await self.llm.chat(
                         system, prompts.render_finalize(self.inbound(task), answer, max_output_chars),
@@ -176,20 +270,22 @@ class App:
                     answer, finalized = final, True
             except LLMError as exc:
                 error = str(exc)
+            policy = override or self.policy()
             secs = round(time.monotonic() - t0, 2)
             ref = self.session.store_artifact(material, {"kind": kind, "source": source[:300], "chars": len(material),
                                                          "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
                                                          **{k: v for k, v in extra.items() if k in ("rc", "timed_out", "truncated")}}) if material else ""
-            scrubbed = self.outbound(answer) if answer else ScrubResult("", 0, {})
+            scrubbed = self.outbound(answer, policy) if answer else ScrubResult("", 0, {})
             # What the worker SAW is part of its memory too, not only what it said —
             # bounded, and scrubbed like everything else that is written down.
-            excerpt = self.outbound(material[:self.cfg.excerpt_chars]).text if material else ""
+            excerpt = self.outbound(material[:self.cfg.excerpt_chars], policy).text if material else ""
             turn = {
                 "kind": kind, "mode": mode, "task": task[:2000], "source": source[:300], "excerpt": excerpt,
                 "verbatim": verbatim,
                 "result": scrubbed.text[:6000] if not error else f"ERROR: {error[:500]}",
                 "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text), "secs": secs,
-                "model": self.llm.last_model, "error": bool(error), **extra,
+                "model": self.llm.last_model, "error": bool(error),
+                **({"disclosure": decision} if decision else {}), **extra,
             }
             tid = self.session.append_turn(turn)
             turn["id"] = tid  # append_turn writes a copy; the ledger row must carry the same id (backfill dedupes on it)
@@ -202,6 +298,7 @@ class App:
                 "scrubbed": scrubbed.replaced, "chunks": getattr(usage, "chunks", 1) if usage else 0,
                 "finalized": finalized, "entities": entities, "verbatim": verbatim, "session": self.session.key,
                 "saved_tokens": saved, "gathered_chars": int(extra.get("gathered_chars") or 0),
+                "disclosure": decision or None,
             })
             if error:
                 trailer = self._trailer([mode, f"turn {tid}", f"ref {ref}" if ref else "", f"{secs}s"])
@@ -213,9 +310,10 @@ class App:
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
                 ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
-                self.llm.last_model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "", scrubbed.trailer(),
+                self.llm.last_model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "",
+                f"disclosure: {decision}" if decision else "", scrubbed.trailer(),
             ])
-            result = scrubbed.text + trailer
+            result = scrubbed.text + (("\n\n" + notice) if notice else "") + trailer
         self.maybe_autocompact()
         return result
 
@@ -400,6 +498,7 @@ def build(cfg: Config) -> FastMCP:
         timeout_s: Annotated[int, Field(ge=0, le=3600, description="Kill the command after this many seconds (0 = server default).")] = 0,
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the digest (0 = server default).")] = 0,
         verbatim: Annotated[bool, Field(description="Quote the relevant output lines EXACTLY (the worker only locates them) instead of digesting. Use for code, config, or anything you must reproduce.")] = False,
+        ctx: Context = None,
     ) -> str:
         a = _app()
         res = await run_command(a.inbound(command), cwd=cwd or None,
@@ -415,7 +514,7 @@ def build(cfg: Config) -> FastMCP:
         return await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
                                 max_output_chars=_budget(max_output_chars), verbatim=verbatim,
                                 extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
-                                       "cmd_secs": res.secs, "gathered_chars": len(res.output)})
+                                       "cmd_secs": res.secs, "gathered_chars": len(res.output)}, ctx=ctx)
 
     @mcp.tool(
         name="local_llm_delegate",
@@ -439,6 +538,7 @@ def build(cfg: Config) -> FastMCP:
         cwd: Annotated[str, Field(description="Base directory for relative paths and the command.")] = "",
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the answer (0 = server default).")] = 0,
         verbatim: Annotated[bool, Field(description="Quote the relevant lines EXACTLY (the worker only locates them) instead of answering in prose.")] = False,
+        ctx: Context = None,
     ) -> str:
         a = _app()
         pieces: list[str] = []
@@ -487,7 +587,7 @@ def build(cfg: Config) -> FastMCP:
         extra["gathered_chars"] = gathered
         extra["_gathered_text"] = "\n\n".join(gathered_parts)
         return await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
-                                max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim)
+                                max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim, ctx=ctx)
 
     @mcp.tool(
         name="local_llm_artifact",
@@ -531,9 +631,11 @@ def build(cfg: Config) -> FastMCP:
         description="Mode, session identity, worker (primary/fallback, which is active), turns since compaction, context size, compaction count, placeholder counts, artifact count, and the tokens-saved estimate for this session and all sessions.",
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
-    async def local_llm_status() -> str:
+    async def local_llm_status(ctx: Context = None) -> str:
         a = _app()
         st = a.session.status()
+        st["disclosure"] = {**a.session.disclosure.to_meta(), "escalation": cfg.escalation,
+                            "open_kinds": sorted(a.policy().open), "client_can_ask": App.client_can_ask(ctx)}
         st["summary"] = a.outbound(a.session.summary()).text
         st["control_socket"] = str(a.control_path) if a.control_server else None
         st["observer"] = a.observer.name
@@ -576,8 +678,41 @@ def build(cfg: Config) -> FastMCP:
             return f"Error: mode must be one of {MODES}"
         previous = a.mode
         a.session.set_mode(mode)
+        if mode == "pii" and previous != "pii":
+            a.vault_memory()
         a.session.append_turn({"kind": "mode", "task": f"mode {previous} -> {mode}", "result": "", "mode": mode})
         a.observer.event("session", "mode_change", {"from": previous, "to": mode, "session": a.session.key})
         return f"Mode is now {mode} (was {previous}).\n\n" + prompts.client_instructions(mode, cfg.model, cfg.base_url)
+
+    @mcp.tool(
+        name="local_llm_disclosure",
+        title="Set what private values may be shown in ASSIST mode",
+        description=(
+            "Record the user's decision on what this ASSIST session may show in clear, when the user has said so in "
+            "the conversation (otherwise the server asks the user itself the first time personal data appears). "
+            "identity = names, addresses, emails, phones; numbers = account/card/id/SSN numbers and dates of birth "
+            "(masked by default). Secrets are never shown in either mode. identity='ask' resets the question. "
+            "Returns the resulting state."),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+    )
+    async def local_llm_disclosure(
+        identity: Annotated[str, Field(pattern=r"^(open|masked|ask|keep)$", description="'open', 'masked', 'ask' (reset) or 'keep'.")] = "keep",
+        numbers: Annotated[str, Field(pattern=r"^(open|masked|keep)$", description="'open', 'masked' or 'keep'.")] = "keep",
+        reason: Annotated[str, Field(description="What the user said, in a few words. Recorded in the session log.")] = "",
+    ) -> str:
+        a = _app()
+        d = a.session.disclosure
+        before = d.to_meta()
+        d.set(identity=("undecided" if identity == "ask" else identity) if identity != "keep" else None,
+              numbers=numbers if numbers != "keep" else None, source="tool")
+        a.session.set_disclosure(d)
+        if d.identity == "masked" and before.get("identity") == "open":
+            a.vault_memory()
+        a.session.append_turn({"kind": "disclosure", "mode": a.mode, "result": "",
+                               "task": f"identity={d.identity} numbers={d.numbers}" + (f" — {reason[:200]}" if reason else "")})
+        a.observer.event("session", "disclosure", {"decision": f"identity={d.identity},numbers={d.numbers}", "source": "tool",
+                                                   "session": a.session.key})
+        return json.dumps({"mode": a.mode, **d.to_meta(), "open_kinds": sorted(a.policy().open),
+                           "note": "secrets are never shown; in PII mode everything is masked regardless"}, indent=1)
 
     return mcp

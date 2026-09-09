@@ -162,6 +162,13 @@ scrubbed summary, control-socket path, observer name.
 
 The block also carries `tokens_saved`: the estimate for this session and for all sessions (see [Tokens saved](#tokens-saved)).
 
+### `local_llm_disclosure`
+
+`local_llm_disclosure(identity="open"|"masked"|"ask"|"keep", numbers="open"|"masked"|"keep", reason="")`
+records what this ASSIST session may show in clear, for when the user has said so in the
+conversation; `identity="ask"` resets the question. Returns the resulting state. Secrets are
+never shown; PII mode masks everything regardless. See [Disclosure](#disclosure--what-may-come-back-in-clear).
+
 ### `local_llm_compact`
 
 Compact now. Normally automatic; useful when a client has no `PreCompact` hook.
@@ -207,12 +214,38 @@ Order of operations matters:
    re-scanned; anything still detectable becomes `[REDACTED]`. A privacy boundary
    cannot rest on a model choosing to comply, so step 2 is help, not the guarantee.
 
-### What ASSIST mode scrubs
+### Disclosure — what may come back in clear
 
-Only secret shapes: keys, tokens, PEM blocks, password assignments. Emails, names and
-phone numbers pass through, because in ASSIST mode the caller would otherwise have run
-the command itself and seen the same output. The high-entropy rule is PII-only so git
-SHAs and ids stay exact in ASSIST digests.
+Mode never decides where work runs: everything runs on the local worker in both modes, and a
+delegation by shape ("read this PDF", "list the accounts") lands here either way. Mode decides
+what comes **back** to the caller. Three tiers:
+
+| Tier | Kinds | PII mode | ASSIST mode |
+|---|---|---|---|
+| secrets | keys, tokens, passwords, PEM blocks | masked | masked, always |
+| numbers | SSN, card, account and id numbers, dates of birth | masked | masked by default (`LOCAL_LLM_MCP_ASSIST_NUMBERS=open` changes the default) |
+| identity | person, address, email, phone | masked | open once the **user** says so |
+
+The first time identity or number values appear in an ASSIST session, the server asks the
+user directly through MCP elicitation (Claude Code shows a dialog; the worker keeps working
+meanwhile): **switch** the session to PII mode, **continue** with identity values shown, or
+show **everything** except secrets. The answer is kept for the session, shown in
+`local_llm_status`, stamped into that result's trailer (`disclosure: asked → continue`) and
+listed in the admin app. Cancelling the dialog masks that result and asks again next time,
+three times at most. Choosing "switch" also vaults the values already written into the
+session's memory, so they leave masked from then on.
+
+Bypasses, in order of directness: the dialog itself; `local_llm_disclosure(identity=…,
+numbers=…)`, which the caller invokes when the user has said what they want in the
+conversation ("just show me the names"), so no dialog is needed; and the deployment default
+`LOCAL_LLM_MCP_ESCALATION`: `ask` (default), `auto` (no dialog: mask and tell the caller,
+also what a client without elicitation gets) or `off` (identity values pass as they always
+did). Nothing opens secrets.
+
+The high-entropy rule is PII-only, so git SHAs and ids stay exact in ASSIST digests. In
+ASSIST, everything detectable is still registered in the session vault (it is local), which is
+what makes a later switch retroactive and lets the caller reuse `[CARD-1]` in a follow-up
+command that needs the real digits.
 
 ### The endpoint must be local
 
@@ -365,6 +398,9 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | `120` | default command timeout, seconds |
 | `LOCAL_LLM_MCP_STRICT_PII` | `0` | treat every bare 10-digit run as a phone number (default: only formatted numbers or ones near phone words) |
 | `LOCAL_LLM_MCP_ENTITY_PASS` | `1` | PII mode: ask the worker for the private values before answering |
+| `LOCAL_LLM_MCP_ESCALATION` | `ask` | first identity/number values in an ASSIST session: `ask` the user (dialog), `auto` (mask and tell the caller), `off` (show identity values) |
+| `LOCAL_LLM_MCP_ASSIST_NUMBERS` | `masked` | whether account/card/id numbers and dates of birth are shown in ASSIST before the user decides |
+| `LOCAL_LLM_MCP_DIALOG_TIMEOUT` | `600` | seconds to wait for the disclosure dialog before masking that result |
 | `LOCAL_LLM_MCP_SHAPES` | `1` | PII mode: the identity-shape layer (addresses, labelled names, dates of birth, labelled id numbers) |
 | `LOCAL_LLM_MCP_PRICES` | `~/.config/local-llm-mcp/prices.json` | override file for the tokens-saved estimate (assumptions + prices; the admin app writes it) |
 | `LOCAL_LLM_MCP_CALLER_MODEL` | unset | headline model for the dollar figure (defaults to the prices file's `caller_model`, then the first model) |

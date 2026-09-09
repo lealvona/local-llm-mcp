@@ -63,8 +63,19 @@ async def main() -> int:
             failures += 1
 
     t_all = time.monotonic()
+    import mcp.types as mtypes
+    asked: list[str] = []
+    answer = ["continue"]  # what the "user" picks in the disclosure dialog
+
+    async def on_elicit(context, req):
+        asked.append(str(getattr(req, "message", "")))
+        a = answer[0]
+        if a in ("cancel", "decline"):
+            return mtypes.ElicitResult(action=a)
+        return mtypes.ElicitResult(action="accept", content={"choice": a})
+
     async with stdio_client(params) as (r, w):
-        async with ClientSession(r, w) as s:
+        async with ClientSession(r, w, elicitation_callback=on_elicit) as s:
             init = await s.initialize()
             instr = init.instructions or ""
             print(f"[init] server={init.serverInfo.name} instructions={len(instr)} chars")
@@ -72,8 +83,8 @@ async def main() -> int:
             tools = await s.list_tools()
             names = sorted(t.name for t in tools.tools)
             print("[tools]", names)
-            check(names == ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_run",
-                            "local_llm_set_mode", "local_llm_status"], "six tools registered")
+            check(names == ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_disclosure", "local_llm_run",
+                            "local_llm_set_mode", "local_llm_status"], "seven tools registered")
 
             st = json.loads(text(await s.call_tool("local_llm_status", {})))
             print(f"[status] key={st['session_key']} mode={st['mode']} sock={st['control_socket']}")
@@ -173,6 +184,41 @@ async def main() -> int:
             check("ACTIVE MODE: ASSIST" in out, "mode switch returns the new instructions")
             res = ctl(before["control_socket"], {"op": "status"})
             check(res.get("mode") == "assist", "control socket sees the new mode")
+
+            # ---- disclosure lifecycle (ASSIST): first personal data asks the user through the client
+            material = "Contact: Priya Testcase <priya.testcase@example.org>, card 4111 1111 1111 1111, ref PR 77"  # gitleaks:allow
+            t0 = time.monotonic()
+            out = text(await s.call_tool("local_llm_delegate", {
+                "task": "Give the contact's email address and the card number exactly as written, in one line.", "material": material}))
+            print(f"[disclosure/continue {time.monotonic()-t0:.1f}s]\n{out}\n")
+            check(len(asked) == 1 and "1 CARD" in asked[0] and "1 EMAIL" in asked[0] and "priya" not in asked[0].lower(),
+                  "first personal data in ASSIST asked the user (counts and kinds only)")
+            check("priya.testcase@example.org" in out and "4111 1111 1111 1111" not in out and "[CARD-" in out,
+                  "after 'continue': identity shown, card number masked")
+            check("disclosure: asked → continue" in out and "The user chose to continue" in out,
+                  "the trailer and a notice record the decision")
+            out = text(await s.call_tool("local_llm_delegate", {"task": "Repeat the contact's email exactly.", "material": material}))
+            check(len(asked) == 1 and "priya.testcase@example.org" in out, "asked once per session; identity stays open")
+            st = json.loads(text(await s.call_tool("local_llm_status", {})))
+            check(st["disclosure"]["identity"] == "open" and st["disclosure"]["numbers"] == "masked"
+                  and st["disclosure"]["client_can_ask"] is True and "EMAIL" in st["disclosure"]["open_kinds"],
+                  "status shows the disclosure state")
+            d = json.loads(text(await s.call_tool("local_llm_disclosure", {"identity": "masked", "reason": "smoke"})))
+            out = text(await s.call_tool("local_llm_delegate", {"task": "Repeat the contact's email exactly.", "material": material}))
+            check(d["identity"] == "masked" and "priya.testcase@example.org" not in out and "[EMAIL-" in out,
+                  "the tool masks identity again without a dialog")
+            await s.call_tool("local_llm_disclosure", {"identity": "ask"})
+            answer[0] = "cancel"
+            out = text(await s.call_tool("local_llm_delegate", {"task": "Repeat the contact's email exactly.", "material": material}))
+            st = json.loads(text(await s.call_tool("local_llm_status", {})))
+            check(len(asked) == 2 and "priya.testcase@example.org" not in out and "did not answer" in out
+                  and st["disclosure"]["identity"] == "undecided" and st["disclosure"]["asked"] == 2,
+                  "a cancelled dialog masks the result and leaves the question open")
+            answer[0] = "switch"
+            out = text(await s.call_tool("local_llm_delegate", {"task": "Repeat the contact's email exactly.", "material": material}))
+            st = json.loads(text(await s.call_tool("local_llm_status", {})))
+            check(len(asked) == 3 and "[EMAIL-" in out and "switched this session to PII mode" in out and st["mode"] == "pii"
+                  and "ACTIVE MODE: PII" in out, "choosing 'switch' moves the session to PII mode and returns the new instructions")
 
     import json as _json, pathlib as _pl  # the server flushes its token measurements at shutdown; read the ledger after
     ledger = _pl.Path(str(state)) / "savings.jsonl"

@@ -39,7 +39,7 @@ from . import prompts
 from .config import ENV_PREFIX, Config, ConfigError, load_env_file
 from .llm import LLMError, LocalLLM
 from .savings import Ledger, Prices, aggregate, cost, costs
-from .scrub import KINDS, PLACEHOLDER_RE, Scrubber, Vault
+from .scrub import KINDS, PLACEHOLDER_RE, Policy, Scrubber, Vault
 
 log = logging.getLogger("local_llm_mcp.admin")
 INDEX = Path(__file__).parent / "admin" / "index.html"
@@ -165,6 +165,7 @@ class AdminState:
                 "last_compaction": meta.get("last_compaction"), "claude_session_id": meta.get("claude_session_id", ""),
                 "claude_pid": meta.get("claude_pid"), "live": self._is_live(meta),
                 "previous_keys": list(meta.get("previous_keys") or []),
+                "disclosure": meta.get("disclosure") if isinstance(meta.get("disclosure"), dict) else {},
                 "placeholders": vault.counts(), "placeholder_total": len(vault.by_placeholder),
                 "artifacts": len(list((d / "artifacts").glob("a_*.txt"))) if (d / "artifacts").is_dir() else 0,
                 "bytes": _dir_size(d), "summary_chars": (d / "summary.md").stat().st_size if (d / "summary.md").is_file() else 0,
@@ -247,11 +248,15 @@ class AdminState:
 
     def scrub_test(self, text: str, mode: str) -> dict:
         vault = Vault(Path(tempfile.mkdtemp(prefix="admin-scrub-")) / "v.json")
-        secrets_only = mode != "pii"
+        policy = {"pii": Policy.everything(),
+                  "assist": Policy.assist(identity_open=True, numbers_open=False),
+                  "assist-masked": Policy.assist(identity_open=False, numbers_open=False),
+                  "assist-all": Policy.assist(identity_open=True, numbers_open=True)}.get(mode, Policy.everything())
         spans = [{"start": s, "end": e, "kind": k, "value": v} for s, e, k, v in
-                 sorted(self.scrubber.find_spans(text, secrets_only=secrets_only), key=lambda t: t[0])]
-        result = self.scrubber.scrub(text, vault, secrets_only=secrets_only)
-        return {"mode": mode, "scrubbed": result.text, "replaced": result.replaced, "kinds": result.kinds, "spans": spans,
+                 sorted(self.scrubber.find_spans(text, policy=policy), key=lambda t: t[0])]
+        result = self.scrubber.scrub(text, vault, policy=policy)
+        return {"mode": mode, "open_kinds": sorted(policy.open), "scrubbed": result.text, "replaced": result.replaced,
+                "kinds": result.kinds, "spans": spans,
                 "placeholders": [{"placeholder": ph, "kind": rec["kind"], "value": rec["value"]}
                                  for ph, rec in vault.by_placeholder.items()]}
 

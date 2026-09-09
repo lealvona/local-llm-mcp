@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 ENV_PREFIX = "LOCAL_LLM_MCP_"
 MODES = ("pii", "assist")
+ESCALATIONS = ("ask", "auto", "off")  # first identity/number values in an ASSIST session
 DEFAULT_ENV_FILE = "~/.config/local-llm-mcp/env"
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -167,6 +168,9 @@ class Config:
     command_timeout: float
     strict_pii: bool
     entity_pass: bool
+    escalation: str
+    assist_numbers: str
+    dialog_timeout: float
     shapes: bool
     prices_path: Path
     caller_model: str
@@ -190,6 +194,12 @@ class Config:
         fallback_base_url = (_env("FALLBACK_BASE_URL", "") or "").strip().rstrip("/")
         if fallback_base_url:
             assert_local_endpoint(fallback_base_url)
+        escalation = (_env("ESCALATION", "ask") or "ask").strip().lower()
+        if escalation not in ESCALATIONS:
+            raise ConfigError(f"{ENV_PREFIX}ESCALATION must be one of {ESCALATIONS}, got {escalation!r}")
+        assist_numbers = (_env("ASSIST_NUMBERS", "masked") or "masked").strip().lower()
+        if assist_numbers not in ("masked", "open"):
+            raise ConfigError(f"{ENV_PREFIX}ASSIST_NUMBERS must be 'masked' or 'open', got {assist_numbers!r}")
         return cls(
             mode=mode,
             base_url=base_url,
@@ -213,6 +223,9 @@ class Config:
             command_timeout=_float("COMMAND_TIMEOUT", 120.0),
             strict_pii=_bool("STRICT_PII", False),
             entity_pass=_bool("ENTITY_PASS", True),
+            escalation=escalation,
+            assist_numbers=assist_numbers,
+            dialog_timeout=_float("DIALOG_TIMEOUT", 600.0),
             shapes=_bool("SHAPES", True),
             prices_path=_path("PRICES", "~/.config/local-llm-mcp/prices.json"),
             caller_model=(_env("CALLER_MODEL") or "").strip(),

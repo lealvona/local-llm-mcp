@@ -39,7 +39,63 @@ from typing import Iterable
 log = logging.getLogger("local_llm_mcp.scrub")
 
 PLACEHOLDER_RE = re.compile(r"\[(?P<kind>[A-Z]+)-(?P<n>\d+)\]")
+# A worker sometimes writes "[CARD-<the digits>]"; masking the digits then yields "[CARD-[CARD-1]]".
+_NESTED_PLACEHOLDER_RE = re.compile(r"\[([A-Z]+)-(\[(?:[A-Z]+)-\d+\])\]")
 KINDS = ("PERSON", "ADDRESS", "PHONE", "EMAIL", "SSN", "CARD", "ACCOUNT", "DOB", "ID", "SECRET", "PII")
+
+# Disclosure tiers: what a caller may be allowed to see in clear (see disclosure.py).
+TIERS: dict[str, frozenset[str]] = {
+    "secrets": frozenset({"SECRET"}),
+    "numbers": frozenset({"SSN", "CARD", "ACCOUNT", "DOB", "ID"}),
+    "identity": frozenset({"PERSON", "ADDRESS", "EMAIL", "PHONE", "PII"}),
+}
+_OPENABLE = TIERS["numbers"] | TIERS["identity"]
+
+
+@dataclass(frozen=True)
+class Policy:
+    """What may leave the server in clear. Kinds in ``open`` pass; every other detectable
+    value is masked. ``entropy`` runs the PII-mode high-entropy rule (off in ASSIST so git
+    SHAs and ids stay exact). Secrets are never in ``open``."""
+
+    open: frozenset[str] = frozenset()
+    entropy: bool = True
+
+    @classmethod
+    def everything(cls) -> "Policy":
+        return cls()
+
+    @classmethod
+    def assist(cls, identity_open: bool = False, numbers_open: bool = False) -> "Policy":
+        o: set[str] = set()
+        if identity_open:
+            o |= TIERS["identity"]
+        if numbers_open:
+            o |= TIERS["numbers"]
+        return cls(open=frozenset(o), entropy=False)
+
+    @classmethod
+    def secrets_only(cls) -> "Policy":
+        return cls(open=_OPENABLE, entropy=False)
+
+    @classmethod
+    def register(cls, *, entropy: bool) -> "Policy":
+        """Detect and vault everything, whatever may later be shown."""
+        return cls(open=frozenset(), entropy=entropy)
+
+    def masks(self, kind: str) -> bool:
+        return kind not in self.open
+
+    @property
+    def fast(self) -> bool:
+        """Nothing but secrets is masked: the identity layers need not run at all."""
+        return _OPENABLE <= self.open
+
+    @staticmethod
+    def resolve(policy: "Policy | None", secrets_only: bool) -> "Policy":
+        if policy is not None:
+            return policy
+        return Policy.secrets_only() if secrets_only else Policy.everything()
 
 _KIND_BY_RULE = {
     "email": "EMAIL",
@@ -537,7 +593,12 @@ class Scrubber:
         self.strict = strict
         self.shapes = shapes
 
-    def find_spans(self, text: str, *, secrets_only: bool = False) -> list[tuple[int, int, str, str]]:
+    def find_spans(self, text: str, *, secrets_only: bool = False,
+                   policy: Policy | None = None) -> list[tuple[int, int, str, str]]:
+        """Spans to mask under ``policy`` (``secrets_only`` is the legacy spelling of
+        ``Policy.secrets_only()``). Secret shapes always; the identity layers only when
+        the policy masks something beyond secrets, and only the kinds it masks."""
+        policy = Policy.resolve(policy, secrets_only)
         spans: list[tuple[int, int, str, str]] = []
         for name, pat, kind, grp in _BUILTIN:
             for m in pat.finditer(text):
@@ -549,16 +610,17 @@ class Scrubber:
                 if name == "assignment_prose" and not _looks_secret(value):
                     continue
                 spans.append((m.start(grp), m.end(grp), kind, value))
-        if not secrets_only:
-            spans.extend(self.rules.spans(text, self.strict))
-            spans.extend(self.terms.spans(text))
-            if self.shapes:
-                spans.extend(identity_spans(text))
+        if policy.fast:
+            spans.extend(s for s in self.rules.spans(text, self.strict) if s[2] == "SECRET")
+            return spans
+        spans.extend(s for s in self.rules.spans(text, self.strict) if policy.masks(s[2]))
+        spans.extend(s for s in self.terms.spans(text) if policy.masks(s[2]))
+        if self.shapes:
+            spans.extend(s for s in identity_spans(text) if policy.masks(s[2]))
+        if policy.entropy:
             for m in _ENTROPY_RE.finditer(text):
                 if _looks_like_credential(m.group(0)):
                     spans.append((m.start(), m.end(), "SECRET", m.group(0)))
-        else:
-            spans.extend(s for s in self.rules.spans(text, self.strict) if s[2] == "SECRET")
         return spans
 
     def register_entities(self, entities: list[dict], material: str, vault: Vault) -> int:
@@ -584,11 +646,13 @@ class Scrubber:
             vault.placeholder_for(kind, value)
         return n
 
-    def register_material(self, text: str, vault: Vault, *, secrets_only: bool = False) -> dict[str, int]:
-        """Assign placeholders for everything detectable in incoming material."""
+    def register_material(self, text: str, vault: Vault, *, secrets_only: bool = False,
+                          policy: Policy | None = None) -> dict[str, int]:
+        """Assign placeholders for everything detectable in incoming material; returns
+        distinct values found per kind (the disclosure lifecycle keys off this)."""
         counts: dict[str, int] = {}
         seen: set[str] = set()
-        for _s, _e, kind, value in self.find_spans(text, secrets_only=secrets_only):
+        for _s, _e, kind, value in self.find_spans(text, secrets_only=secrets_only, policy=policy):
             if value in seen:
                 continue
             seen.add(value)
@@ -596,16 +660,19 @@ class Scrubber:
             counts[kind] = counts.get(kind, 0) + 1
         return counts
 
-    def scrub(self, text: str, vault: Vault, *, secrets_only: bool = False) -> ScrubResult:
-        """Replace every detectable value AND every vault value with placeholders."""
+    def scrub(self, text: str, vault: Vault, *, secrets_only: bool = False,
+              policy: Policy | None = None) -> ScrubResult:
+        """Replace every detectable value AND every vault value the policy masks with placeholders."""
         if not text:
             return ScrubResult(text, 0, {})
-        spans = self.find_spans(text, secrets_only=secrets_only)
+        text = _NESTED_PLACEHOLDER_RE.sub(r"\2", text)  # "[CARD-[CARD-1]]" from an earlier pass or a worker
+        policy = Policy.resolve(policy, secrets_only)
+        spans = self.find_spans(text, policy=policy)
         # Anything the session has already seen leaks the same way whatever
         # context it appears in: exact-match every vault value too.
         for value, ph in vault.by_value.items():
             kind = vault.by_placeholder[ph]["kind"]
-            if secrets_only and kind != "SECRET":
+            if not policy.masks(kind):
                 continue
             if len(value) < 4:
                 continue
@@ -634,9 +701,9 @@ class Scrubber:
             kinds[kind] = kinds.get(kind, 0) + 1
             pos = e
         out.append(text[pos:])
-        result = "".join(out)
+        result = _NESTED_PLACEHOLDER_RE.sub(r"\2", "".join(out))
         # Belt and braces: nothing detectable may survive a scrub.
-        leftovers = [s for s in self.find_spans(result, secrets_only=secrets_only)
+        leftovers = [s for s in self.find_spans(result, policy=policy)
                      if not PLACEHOLDER_RE.fullmatch(s[3])]
         if leftovers:
             leftovers.sort(key=lambda s: (s[0], -(s[1] - s[0])))
@@ -650,5 +717,5 @@ class Scrubber:
                 kinds[kind] = kinds.get(kind, 0) + 1
                 pos = e
             out.append(result[pos:])
-            result = "".join(out)
+            result = _NESTED_PLACEHOLDER_RE.sub(r"\2", "".join(out))
         return ScrubResult(result, replaced, kinds)
