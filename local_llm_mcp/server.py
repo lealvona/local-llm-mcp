@@ -22,6 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import prompts
+from . import savings as sv
 from .config import MODES, Config
 from .control import socket_path, start as start_control
 from .llm import LLMError, LocalLLM
@@ -41,6 +42,8 @@ class App:
         self.llm = LocalLLM(cfg)
         self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
         self.observer = load_observer(cfg)
+        self.prices = sv.Prices(cfg.prices_path, cfg.caller_model)
+        self.ledger = sv.Ledger(cfg.state_dir / "savings.jsonl")
         self.lock = asyncio.Lock()
         self.compacting: asyncio.Task | None = None
         self.control_server: asyncio.AbstractServer | None = None
@@ -141,14 +144,18 @@ class App:
                 "verbatim": verbatim,
                 "result": scrubbed.text[:6000] if not error else f"ERROR: {error[:500]}",
                 "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text), "secs": secs,
-                "model": self.cfg.model, **extra,
+                "model": self.cfg.model, "error": bool(error), **extra,
             }
             tid = self.session.append_turn(turn)
+            est = sv.estimate_turn(turn, self.prices.assumptions)
+            saved = est["avoided_input"] + est["avoided_output"]
+            self.ledger.append(self.session.key, turn)
             self.observer.event("execute_tool", f"local_llm.{kind}", {
                 "mode": mode, "turn": tid, "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text),
                 "secs": secs, "model": self.cfg.model, "rc": extra.get("rc"), "error": bool(error),
                 "scrubbed": scrubbed.replaced, "chunks": getattr(usage, "chunks", 1) if usage else 0,
                 "finalized": finalized, "entities": entities, "verbatim": verbatim, "session": self.session.key,
+                "saved_tokens": saved, "gathered_chars": int(extra.get("gathered_chars") or 0),
             })
             if error:
                 trailer = self._trailer([mode, f"turn {tid}", f"ref {ref}" if ref else "", f"{secs}s"])
@@ -160,7 +167,7 @@ class App:
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
                 ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
-                self.cfg.model, f"{secs}s", scrubbed.trailer(),
+                self.cfg.model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "", scrubbed.trailer(),
             ])
             result = scrubbed.text + trailer
         self.maybe_autocompact()
@@ -358,7 +365,7 @@ def build(cfg: Config) -> FastMCP:
         return await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
                                 max_output_chars=_budget(max_output_chars), verbatim=verbatim,
                                 extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
-                                       "cmd_secs": res.secs})
+                                       "cmd_secs": res.secs, "gathered_chars": len(res.output)})
 
     @mcp.tool(
         name="local_llm_delegate",
@@ -387,6 +394,7 @@ def build(cfg: Config) -> FastMCP:
         pieces: list[str] = []
         sources: list[str] = []
         extra: dict = {}
+        gathered = 0  # chars the caller did NOT already hold (command output, files)
         if material:
             pieces.append(material)
             sources.append(f"inline ({len(material)} chars)")
@@ -396,6 +404,7 @@ def build(cfg: Config) -> FastMCP:
             pieces.append(f"### COMMAND: {command}\n### exit code: {res.rc}{' (timed out)' if res.timed_out else ''}\n"
                           + (res.output or "(no output)"))
             sources.append(f"command: {command[:120]}")
+            gathered += len(res.output or "")
             extra.update({"rc": res.rc, "timed_out": res.timed_out, "cmd_secs": res.secs})
         if paths:
             expanded = [a.inbound(p) for p in paths]
@@ -408,17 +417,20 @@ def build(cfg: Config) -> FastMCP:
                 raw = single.read_bytes().decode("utf-8", "replace")
                 text, truncated_file = cap(raw, cfg.material_max_chars)
                 pieces.append(text)
+                gathered += len(text)
                 sources.append(_short_path(str(single)))
                 if truncated_file:
                     extra["truncated"] = True
             else:
                 text, meta = read_paths(expanded, max_chars=cfg.material_max_chars, cwd=cwd or None)
                 pieces.append(text)
+                gathered += len(text)
                 sources.append("paths: " + ", ".join(_short_path(p) for p in expanded[:8]) + (" …" if len(expanded) > 8 else ""))
         joined = "\n\n".join(pieces)
         joined, truncated = cap(joined, cfg.material_max_chars)
         if truncated:
             extra["truncated"] = True
+        extra["gathered_chars"] = gathered
         return await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
                                 max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim)
 
@@ -461,7 +473,7 @@ def build(cfg: Config) -> FastMCP:
     @mcp.tool(
         name="local_llm_status",
         title="Show the worker's session state",
-        description="Mode, session identity, model, turns since compaction, context size, compaction count, placeholder counts, artifact count.",
+        description="Mode, session identity, model, turns since compaction, context size, compaction count, placeholder counts, artifact count, and the tokens-saved estimate for this session and all sessions.",
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
     async def local_llm_status() -> str:
@@ -472,6 +484,7 @@ def build(cfg: Config) -> FastMCP:
         st["observer"] = a.observer.name
         st["observer_run"] = a.observer.run_id or None
         st["compaction_in_progress"] = bool(a.compacting and not a.compacting.done())
+        st["tokens_saved"] = sv.report(a.session.turns(), a.ledger, a.prices)
         return json.dumps(st, indent=1)
 
     @mcp.tool(

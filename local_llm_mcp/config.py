@@ -164,6 +164,8 @@ class Config:
     strict_pii: bool
     entity_pass: bool
     shapes: bool
+    prices_path: Path
+    caller_model: str
     state_dir: Path
     sock_dir: Path
     rules_path: Path | None
@@ -201,6 +203,8 @@ class Config:
             strict_pii=_bool("STRICT_PII", False),
             entity_pass=_bool("ENTITY_PASS", True),
             shapes=_bool("SHAPES", True),
+            prices_path=_path("PRICES", "~/.config/local-llm-mcp/prices.json"),
+            caller_model=(_env("CALLER_MODEL") or "").strip(),
             state_dir=_path("STATE_DIR", "~/.local/state/local-llm-mcp"),
             sock_dir=_path("SOCK_DIR", default_sock_dir()),
             rules_path=_opt_path("RULES"),

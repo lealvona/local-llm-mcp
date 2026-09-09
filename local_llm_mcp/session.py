@@ -259,6 +259,9 @@ class Session:
                     continue
         return out
 
+    def turns(self) -> list[dict]:
+        return self._all_turns()
+
     def turns_since_compaction(self) -> list[dict]:
         turns = self._all_turns()
         last = -1

@@ -32,6 +32,7 @@ package.
 - [Tools](#tools)
 - [The privacy boundary](#the-privacy-boundary)
 - [Session memory and compaction](#session-memory-and-compaction)
+- [Tokens saved](#tokens-saved)
 - [Install and wire into Claude Code](#install-and-wire-into-claude-code)
 - [Configuration reference](#configuration-reference)
 - [Rules file](#rules-file)
@@ -157,6 +158,8 @@ Mode, session key, the caller's session id, model, endpoint, turn counts, contex
 size, compaction count and time, placeholder counts by kind, artifact count, the
 scrubbed summary, control-socket path, observer name.
 
+The block also carries `tokens_saved`: the estimate for this session and for all sessions (see [Tokens saved](#tokens-saved)).
+
 ### `local_llm_compact`
 
 Compact now. Normally automatic; useful when a client has no `PreCompact` hook.
@@ -243,6 +246,45 @@ server also compacts on its own when uncompacted turns exceed
 **Control socket ops:** `compact` (queue), `session` (announce the session id),
 `status`. One JSON object per line in, one out.
 
+## Tokens saved
+
+Every counted turn records what the server **gathered** on the caller's behalf (command
+output, files) and what it **returned** (the digest). From those two sizes the server
+estimates what the caller did not have to spend, per session and across all sessions:
+
+| Quantity | Estimate | Why |
+|---|---|---|
+| avoided input | tokens(gathered) − tokens(returned) | the caller read the digest instead of the raw output; inline material it pasted was already in its context and counts for nothing |
+| avoided output | tokens(returned) × `output_credit[kind]` | for a delegation the worker wrote the answer the caller would otherwise have generated (credit 1.0); a digest of command output (0) and verbatim quoting (0) replace reading, not writing |
+| carried | avoided input × `context_reuse_calls` | every token that enters the caller's context is re-sent on each later model call until compaction; priced at the model's cache-read rate where it has one, else at the input rate |
+
+Dollars are **list prices** per 1M tokens for flagship models of every major provider, read
+from the providers' own pricing pages and stamped with the date they were checked
+(`local_llm_mcp/prices.json`). They are an equivalent, not an invoice: on a subscription the
+figure is the usage kept out of the plan's limits; batch, flex and long-context tiers are
+ignored (the `context_note` names them).
+
+Where it shows:
+
+- every result trailer carries `saved ≈ N tok` (avoided input + avoided output for that turn);
+- `local_llm_status` returns a `tokens_saved` block — this session, all sessions, the headline
+  model's dollar figure, and a per-model table;
+- the admin app's **Tokens saved** tab: all-time tiles, by model, by session, and an editor for
+  the assumptions and prices.
+
+Everything is configurable and applies retroactively, because the ledger stores characters,
+not tokens: `chars_per_token` (default 3.8 — deliberately conservative: Anthropic states that Claude 4.7
+and later use a tokenizer producing roughly 30 % more tokens for the same text, so for those models the
+true figure is nearer 3, and the estimate understates the saving), `context_reuse_calls` (default 8), the output
+credits, and the headline model (`caller_model`, or `LOCAL_LLM_MCP_CALLER_MODEL`). Edits go to
+the override file `LOCAL_LLM_MCP_PRICES` (default `~/.config/local-llm-mcp/prices.json`),
+which merges over the package defaults by model id, can add models or disable one
+(`"enabled": false`), and is hot-reloaded. The admin tab writes that file; "reset" removes it.
+The cross-session ledger is `<state>/savings.jsonl`, append-only, one line per counted turn;
+it survives session purges. Sessions recorded before the ledger existed can be added from their
+context logs with `local-llm-mcp-admin --backfill-savings` (or the button on the tab); the
+gathered size of those older turns is inferred from the turn's raw size and source. Idempotent.
+
 ## Install and wire into Claude Code
 
 Requirements: Python 3.12+, a local OpenAI-compatible chat endpoint (vLLM, llama.cpp
@@ -308,6 +350,8 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_STRICT_PII` | `0` | treat every bare 10-digit run as a phone number (default: only formatted numbers or ones near phone words) |
 | `LOCAL_LLM_MCP_ENTITY_PASS` | `1` | PII mode: ask the worker for the private values before answering |
 | `LOCAL_LLM_MCP_SHAPES` | `1` | PII mode: the identity-shape layer (addresses, labelled names, dates of birth, labelled id numbers) |
+| `LOCAL_LLM_MCP_PRICES` | `~/.config/local-llm-mcp/prices.json` | override file for the tokens-saved estimate (assumptions + prices; the admin app writes it) |
+| `LOCAL_LLM_MCP_CALLER_MODEL` | unset | headline model for the dollar figure (defaults to the prices file's `caller_model`, then the first model) |
 | `LOCAL_LLM_MCP_RULES` | built-in | JSON rules file (see below) |
 | `LOCAL_LLM_MCP_PRIVATE_TERMS` | `~/.config/local-llm-mcp/private_terms.json` | terms file (see below) |
 | `LOCAL_LLM_MCP_STATE_DIR` | `~/.local/state/local-llm-mcp` | sessions, pidmap |

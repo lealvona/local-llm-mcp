@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 from . import prompts
 from .config import ENV_PREFIX, Config, ConfigError, load_env_file
 from .llm import LLMError, LocalLLM
+from .savings import Ledger, Prices, aggregate, cost, costs
 from .scrub import KINDS, PLACEHOLDER_RE, Scrubber, Vault
 
 log = logging.getLogger("local_llm_mcp.admin")
@@ -66,6 +67,8 @@ class AdminState:
         self.cfg = cfg
         self.token = token
         self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
+        self.prices = Prices(cfg.prices_path, cfg.caller_model)
+        self.ledger = Ledger(cfg.state_dir / "savings.jsonl")
 
     # ---- terms -------------------------------------------------------------------
 
@@ -270,6 +273,45 @@ class AdminState:
             found.append({"kind": kind, "value": value})
         return found
 
+    # ---- tokens saved --------------------------------------------------------------
+
+    @staticmethod
+    def _turns_of(d: Path | None) -> list[dict]:
+        if d is None or not (d / "context.jsonl").is_file():
+            return []
+        out = []
+        for line in (d / "context.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    def savings(self) -> dict:
+        a = self.prices.assumptions
+        caller = self.prices.caller_model()
+        cm = self.prices.model(caller)
+        rows = []
+        for s in self.sessions():
+            agg = aggregate(self._turns_of(self._session_dir(s["key"])), a)
+            c = cost(agg, cm) if cm else {}
+            rows.append({"key": s["key"], "mode": s["mode"], "live": s["live"], "last_seen": s["last_seen"], **agg, **c})
+        rows.sort(key=lambda r: r.get("with_carry_usd", 0), reverse=True)
+        all_time = self.ledger.totals(a)
+        per_model = costs(all_time, self.prices)
+        return {"caller_model": caller, "assumptions": a, "prices_checked": self.prices.doc.get("checked", ""),
+                "all_time": {**all_time, "cost": per_model.get(caller)},
+                "per_model": {mid: {"all_time_direct_usd": v["direct_usd"], "all_time_usd": v["with_carry_usd"]}
+                              for mid, v in per_model.items()},
+                "sessions": rows}
+
+    def prices_doc(self) -> dict:
+        self.prices.reload()
+        return {**self.prices.doc, "override_path": str(self.cfg.prices_path),
+                "override_present": self.prices.override_present,
+                "defaults_checked": self.prices.defaults.get("checked", ""),
+                "default_model_ids": [m.get("model_id") for m in self.prices.defaults.get("models", [])]}
+
     # ---- read-only views -----------------------------------------------------------
 
     def rules(self) -> dict:
@@ -292,7 +334,17 @@ class AdminState:
             "placeholders": ph_total, "artifacts": sum(s["artifacts"] for s in sessions),
             "state_dir": str(self.cfg.state_dir), "state_bytes": sum(s["bytes"] for s in sessions),
             "entity_pass": self.cfg.entity_pass, "strict_pii": self.cfg.strict_pii, "shapes": self.cfg.shapes, "observer": self.cfg.observer or "none",
+            "savings": self._savings_summary(),
         }
+
+    def _savings_summary(self) -> dict:
+        a = self.prices.assumptions
+        caller = self.prices.caller_model()
+        agg = self.ledger.totals(a)
+        cm = self.prices.model(caller)
+        return {"caller_model": caller, "turns": agg["turns"], "sessions": agg["sessions"],
+                "avoided_input": agg["avoided_input"], "avoided_output": agg["avoided_output"], "carried": agg["carried"],
+                **(cost(agg, cm) if cm else {"direct_usd": 0.0, "carried_usd": 0.0, "with_carry_usd": 0.0})}
 
 
 # ---------------------------------------------------------------------------- HTTP
@@ -367,6 +419,20 @@ def make_handler(state: AdminState):
                 return self._json(200, state.cfg.public())
             if method == "GET" and head == "rules":
                 return self._json(200, state.rules())
+            if method == "GET" and head == "savings":
+                return self._json(200, state.savings())
+            if method == "POST" and head == "savings" and len(parts) > 1 and parts[1] == "backfill":
+                added = state.ledger.backfill(state._sessions_dir())
+                return self._json(200, {"added": added, **state.savings()})
+            if head == "prices":
+                if method == "GET":
+                    return self._json(200, state.prices_doc())
+                if method == "POST":
+                    state.prices.save_override(self._body())
+                    return self._json(200, state.prices_doc())
+                if method == "DELETE":
+                    reset = state.prices.reset_override()
+                    return self._json(200, {"reset": reset, **state.prices_doc()})
             if head == "terms":
                 if method == "GET":
                     return self._json(200, state.terms_doc())
@@ -448,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="local-llm-mcp-admin", description="web admin for local-llm-mcp's PII layer")
     ap.add_argument("--bind", default=None, help=f"address to bind ({ENV_PREFIX}ADMIN_BIND, default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=None, help=f"port ({ENV_PREFIX}ADMIN_PORT, default 8631)")
+    ap.add_argument("--backfill-savings", action="store_true",
+                    help="add every counted turn of every session on disk to the tokens-saved ledger (idempotent), then exit")
     args = ap.parse_args(argv)
     load_env_file()
     try:
@@ -458,6 +526,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     logging.basicConfig(stream=sys.stderr, level=getattr(logging, cfg.log_level, logging.INFO),
                         format="%(asctime)s local-llm-mcp-admin %(levelname)s %(name)s: %(message)s")
+    if args.backfill_savings:
+        led = Ledger(cfg.state_dir / "savings.jsonl")
+        added = led.backfill(cfg.state_dir / "sessions")
+        print(f"savings ledger {led.path}: {added} turn(s) added, {len(led.records())} total", file=sys.stderr)
+        return 0
     bind = args.bind or os.environ.get(ENV_PREFIX + "ADMIN_BIND") or "127.0.0.1"
     port = args.port or int(os.environ.get(ENV_PREFIX + "ADMIN_PORT") or 8631)
     if bind not in ("127.0.0.1", "localhost", "::1") and not token:
