@@ -36,7 +36,7 @@ async def check(path: Path) -> bool:
     values = guarded_values(path)
     print(f"[material] {path}: {len(values)} secret-shaped values >= 8 chars to guard")
     run = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    env = {**os.environ, "LOCAL_LLM_MCP_MODE": "pii", "LOCAL_LLM_MCP_OBSERVER": "",
+    env = {"LOCAL_LLM_MCP_ARM": "on", **os.environ, "LOCAL_LLM_MCP_MODE": "pii", "LOCAL_LLM_MCP_OBSERVER": "",
            "LOCAL_LLM_MCP_STATE_DIR": tempfile.mkdtemp(prefix="llm-mcp-leakcheck-"),
            "LOCAL_LLM_MCP_SOCK_DIR": tempfile.mkdtemp(prefix="llm-mcp-lc-", dir=run),
            "LOCAL_LLM_MCP_SESSION": f"leakcheck-{int(time.time())}"}

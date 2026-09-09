@@ -22,6 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import prompts
+from .arming import ARM_CHOICES, MAX_ARM_ASKS, NO_DIALOG_TEXT, OFF_TEXT, UNANSWERED_TEXT, EnableChoice, arm_message
 from . import savings as sv
 from .config import MODES, Config
 from .disclosure import CHOICES, DisclosureChoice, detected_tiers, dialog_message, found_text
@@ -73,6 +74,55 @@ class App:
         texts = [self.session.summary()] + [str(t.get("excerpt") or "") for t in turns] + [str(t.get("result") or "") for t in turns]
         counts = self.scrubber.register_material("\n".join(texts), self.session.vault, policy=Policy.register(entropy=False))
         return sum(counts.values())
+
+    async def ensure_armed(self, ctx: Context | None, trigger: str = "a tool") -> tuple[bool, str]:
+        """The opt-in gate. Returns (on, text): when on, ``text`` is empty or the operating rules to
+        prepend to this first result; when off, ``text`` is the refusal to return instead of working.
+        Passes without a dialog only on the user's standing approval (LOCAL_LLM_MCP_ARM=on) or a
+        session already turned on (dialog, tool, or the admin app)."""
+        self.note_client(ctx)
+        if self.cfg.arm == "on":
+            if self.session.armed_state() != "on":
+                self.session.set_armed("on", "env")
+                self.observer.event("session", "armed", {"state": "on", "source": "env", "session": self.session.key})
+            return True, ""
+        self.session.reload_meta_if_changed()
+        state = self.session.armed_state()
+        if state == "on":
+            return True, ""
+        if state == "off":
+            return False, OFF_TEXT
+        if not self.client_can_ask(ctx):
+            return False, NO_DIALOG_TEXT
+        asks = self.session.bump_armed_asks()
+        if asks > MAX_ARM_ASKS:
+            self.session.set_armed("off", "unanswered")
+            return False, OFF_TEXT
+        action, choice = "error", ""
+        try:
+            res = await asyncio.wait_for(ctx.elicit(arm_message(self.mode, self.cfg.model, trigger), EnableChoice),
+                                         timeout=self.cfg.dialog_timeout)
+            action = str(res.action)
+            if action == "accept" and res.data is not None:
+                choice = str(res.data.choice or "").strip().lower()
+        except asyncio.TimeoutError:
+            action = "timeout"
+        except Exception as exc:
+            log.warning("turn-on dialog failed: %s", exc)
+        if action != "accept" or choice not in ARM_CHOICES:
+            self.observer.event("session", "armed", {"state": "unanswered", "source": action, "session": self.session.key})
+            return False, UNANSWERED_TEXT.format(action=action)
+        if choice == "off":
+            self.session.set_armed("off", "dialog")
+            self.observer.event("session", "armed", {"state": "off", "source": "dialog", "session": self.session.key})
+            return False, OFF_TEXT
+        if choice == "on_pii" and self.mode != "pii":
+            self.session.set_mode("pii")
+            self.vault_memory()
+        self.session.set_armed("on", "dialog")
+        self.observer.event("session", "armed", {"state": "on", "source": "dialog", "mode": self.mode, "session": self.session.key})
+        return True, (f"[local-llm-mcp] The user turned this server on for this session (mode {self.mode.upper()}). "
+                      "Operating rules:\n" + prompts.client_instructions(self.mode, self.cfg.model, self.cfg.base_url))
 
     def note_client(self, ctx: Context | None) -> None:
         """Remember which MCP client this session belongs to (name, version, whether it can show a dialog)."""
@@ -498,7 +548,7 @@ def build(cfg: Config) -> FastMCP:
 
     mcp = FastMCP(
         "local_llm_mcp",
-        instructions=prompts.client_instructions(app.mode, cfg.model, cfg.base_url),
+        instructions=prompts.gate_instructions(app.mode, cfg.model),
         lifespan=lifespan,
         log_level=cfg.log_level if cfg.log_level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL") else "INFO",
     )
@@ -529,6 +579,9 @@ def build(cfg: Config) -> FastMCP:
         ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_run")
+        if not on:
+            return note
         res = await run_command(a.inbound(command), cwd=cwd or None,
                                 timeout=float(timeout_s or cfg.command_timeout), max_chars=cfg.material_max_chars)
         task_text = task.strip() or prompts.DEFAULT_RUN_TASK
@@ -539,10 +592,11 @@ def build(cfg: Config) -> FastMCP:
         material = res.output
         if not material.strip():
             material = f"(no output; exit code {res.rc}{', timed out' if res.timed_out else ''})"
-        return await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
-                                max_output_chars=_budget(max_output_chars), verbatim=verbatim,
-                                extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
-                                       "cmd_secs": res.secs, "gathered_chars": len(res.output)}, ctx=ctx)
+        result = await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
+                                  max_output_chars=_budget(max_output_chars), verbatim=verbatim,
+                                  extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
+                                         "cmd_secs": res.secs, "gathered_chars": len(res.output)}, ctx=ctx)
+        return (note + "\n\n" + result) if note else result
 
     @mcp.tool(
         name="local_llm_delegate",
@@ -571,6 +625,9 @@ def build(cfg: Config) -> FastMCP:
         ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_delegate")
+        if not on:
+            return note
         pieces: list[str] = []
         sources: list[str] = []
         extra: dict = {}
@@ -616,8 +673,9 @@ def build(cfg: Config) -> FastMCP:
             extra["truncated"] = True
         extra["gathered_chars"] = gathered
         extra["_gathered_text"] = "\n\n".join(gathered_parts)
-        return await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
-                                max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim, ctx=ctx)
+        result = await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
+                                  max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim, ctx=ctx)
+        return (note + "\n\n" + result) if note else result
 
     @mcp.tool(
         name="local_llm_artifact",
@@ -635,8 +693,12 @@ def build(cfg: Config) -> FastMCP:
         limit: Annotated[int, Field(ge=100, le=20000, description="Maximum characters to return (character mode).")] = 4000,
         line_start: Annotated[int, Field(ge=0, description="First line to return, 1-based (line mode; 0 = character mode).")] = 0,
         line_end: Annotated[int, Field(ge=0, description="Last line to return, inclusive (0 = line_start + 199).")] = 0,
+        ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_artifact")
+        if not on:
+            return note
         raw = a.session.read_artifact(ref)
         if raw is None:
             return f"Error: no artifact {ref} in this session (refs are per conversation; see local_llm_status)."
@@ -666,6 +728,9 @@ def build(cfg: Config) -> FastMCP:
         a.note_client(ctx)
         st = a.session.status()
         st["client"] = a.session.meta.get("client") or None
+        a.session.reload_meta_if_changed()
+        st["armed"] = {**(a.session.meta.get("armed") if isinstance(a.session.meta.get("armed"), dict) else {}),
+                       "policy": cfg.arm, "client_can_ask": App.client_can_ask(ctx)}
         st["disclosure"] = {**a.session.disclosure.to_meta(), "escalation": cfg.escalation,
                             "open_kinds": sorted(a.policy().open), "client_can_ask": App.client_can_ask(ctx)}
         st["summary"] = a.outbound(a.session.summary()).text
@@ -688,8 +753,12 @@ def build(cfg: Config) -> FastMCP:
     )
     async def local_llm_compact(
         reason: Annotated[str, Field(description="Why (recorded in the context log).")] = "requested by caller",
+        ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_compact")
+        if not on:
+            return note
         res = await a.compact(reason)
         return json.dumps(res, indent=1)
 
@@ -704,8 +773,12 @@ def build(cfg: Config) -> FastMCP:
     )
     async def local_llm_set_mode(
         mode: Annotated[str, Field(pattern=r"^(pii|assist)$", description="'pii' or 'assist'.")],
+        ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_set_mode")
+        if not on:
+            return note
         if mode not in MODES:
             return f"Error: mode must be one of {MODES}"
         previous = a.mode
@@ -720,12 +793,37 @@ def build(cfg: Config) -> FastMCP:
                 description="When and how to call this server (the same text as the connection instructions; for "
                             "clients that do not surface them).")
     def local_llm_instructions_prompt() -> str:
-        return prompts.client_instructions(_app().mode, cfg.model, cfg.base_url)
+        a = _app()
+        off = "" if a.session.armed_state() == "on" or cfg.arm == "on" else "(OFF for this session until the user turns it on: call local_llm_enable.)\n\n"
+        return off + prompts.client_instructions(a.mode, cfg.model, cfg.base_url)
 
     @mcp.resource("local-llm://instructions", name="local_llm_instructions", mime_type="text/plain",
                   description="Current mode and the rules for calling this server.")
     def local_llm_instructions_resource() -> str:
-        return prompts.client_instructions(_app().mode, cfg.model, cfg.base_url)
+        a = _app()
+        off = "" if a.session.armed_state() == "on" or cfg.arm == "on" else "(OFF for this session until the user turns it on: call local_llm_enable.)\n\n"
+        return off + prompts.client_instructions(a.mode, cfg.model, cfg.base_url)
+
+    @mcp.tool(
+        name="local_llm_enable",
+        title="Offer to turn this server on for the session (the user decides)",
+        description=(
+            "Ask the user whether to turn local-llm-mcp on for this session. The server shows the user a dialog; nothing "
+            "is delegated unless they say yes. Call it once when a step would print far more than you need or would "
+            "touch private data. If the user declined, do not call it again unless they ask. Returns the operating "
+            "rules when the user turns it on, or a refusal otherwise."),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+    )
+    async def local_llm_enable(ctx: Context = None) -> str:
+        a = _app()
+        already = a.session.armed_state() == "on" or cfg.arm == "on"
+        on, note = await a.ensure_armed(ctx, "local_llm_enable")
+        if not on:
+            return note
+        if already or not note:
+            return (f"[local-llm-mcp] Already on for this session (mode {a.mode.upper()}). Operating rules:\n"
+                    + prompts.client_instructions(a.mode, cfg.model, cfg.base_url))
+        return note
 
     @mcp.tool(
         name="local_llm_disclosure",
@@ -742,8 +840,12 @@ def build(cfg: Config) -> FastMCP:
         identity: Annotated[str, Field(pattern=r"^(open|masked|ask|keep)$", description="'open', 'masked', 'ask' (reset) or 'keep'.")] = "keep",
         numbers: Annotated[str, Field(pattern=r"^(open|masked|keep)$", description="'open', 'masked' or 'keep'.")] = "keep",
         reason: Annotated[str, Field(description="What the user said, in a few words. Recorded in the session log.")] = "",
+        ctx: Context = None,
     ) -> str:
         a = _app()
+        on, note = await a.ensure_armed(ctx, "local_llm_disclosure")
+        if not on:
+            return note
         d = a.session.disclosure
         before = d.to_meta()
         d.set(identity=("undecided" if identity == "ask" else identity) if identity != "keep" else None,

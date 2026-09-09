@@ -179,6 +179,17 @@ CLIENT_ASSIST = """ACTIVE MODE: ASSIST. Delegate OFTEN: every step that needs no
 CLIENT_COMMON = """local-llm-mcp: a worker model on the LAN ({model}) with its OWN memory of this conversation, compacted whenever yours is; you never manage it. Tools: local_llm_run(command, task?, verbatim?) → digest of the output; local_llm_delegate(task, material?, paths?, command?, verbatim?) → answer over files/text/command output; local_llm_artifact(ref, line_start?/line_end? or offset?/limit?) → exact slice of a stored raw output; local_llm_status, local_llm_compact, local_llm_set_mode, local_llm_disclosure. verbatim=true ONLY for text you will reproduce or edit (code, config, a stack trace): the worker locates lines, the server copies them; never for questions, counts, summaries or listings. Placeholders like [EMAIL-1]/[SECRET-2] are stable all conversation and are re-expanded server-side when you use them in a later task or command; never ask what one stands for. Write tasks precisely (what to extract, thresholds, output shape): the worker answers for a caller who cannot see the material."""
 
 
+GATE = """local-llm-mcp is OFF until the user turns it on — it never intercepts anything without the user's explicit approval. What it offers, once on: a worker model on the user's own network ({model}) that runs commands, reads files and works over material for you and returns sanitized digests, so large outputs and private data never enter your context (mode {mode}: {mode_line}). OFFER it when a step would print far more than you need, or would touch private data (names, addresses, credentials, personal mail): call local_llm_enable once — the server asks the user in a dialog. Until the user says yes, call no other tool here. If the user says no, do not ask again this session. After yes, the result carries the full operating rules (also: prompt local_llm_instructions, resource local-llm://instructions, local_llm_status)."""
+
+MODE_LINE = {"pii": "everything private comes back as placeholders",
+             "assist": "secrets and account/id numbers masked; names shown only if the user allows"}
+
+
+def gate_instructions(mode: str, model: str) -> str:
+    """What the client sees at connect time: the offer, and the rule that it stays off until the user says so."""
+    return GATE.format(model=model, mode=mode.upper(), mode_line=MODE_LINE.get(mode, ""))
+
+
 def client_instructions(mode: str, model: str, endpoint: str) -> str:
     text = (CLIENT_PII if mode == "pii" else CLIENT_ASSIST) + "\n\n" + CLIENT_COMMON.format(model=model)
     return text[:2040]

@@ -167,6 +167,7 @@ class AdminState:
                 "previous_keys": list(meta.get("previous_keys") or []),
                 "disclosure": meta.get("disclosure") if isinstance(meta.get("disclosure"), dict) else {},
                 "client": (meta.get("client") or {}).get("name", "") if isinstance(meta.get("client"), dict) else "",
+                "armed": meta.get("armed") if isinstance(meta.get("armed"), dict) else {},
                 "placeholders": vault.counts(), "placeholder_total": len(vault.by_placeholder),
                 "artifacts": len(list((d / "artifacts").glob("a_*.txt"))) if (d / "artifacts").is_dir() else 0,
                 "bytes": _dir_size(d), "summary_chars": (d / "summary.md").stat().st_size if (d / "summary.md").is_file() else 0,
@@ -209,6 +210,22 @@ class AdminState:
         summary = (d / "summary.md").read_text(encoding="utf-8", errors="replace") if (d / "summary.md").is_file() else ""
         return {"key": key, "meta": meta, "live": self._is_live(meta), "placeholders": placeholders,
                 "summary": summary, "turns": turns, "artifacts": artifacts, "bytes": _dir_size(d)}
+
+    def arm_session(self, key: str, state: str) -> tuple[bool, str]:
+        """The user's explicit switch for one session from the admin app (a live server rereads meta.json)."""
+        d = self._session_dir(key)
+        if d is None or not (d / "meta.json").is_file():
+            return False, "no such session"
+        if state not in ("on", "off"):
+            return False, "state must be 'on' or 'off'"
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        rec = meta.get("armed") if isinstance(meta.get("armed"), dict) else {}
+        rec.update({"state": state, "source": "admin", "ts": _now()})
+        meta["armed"] = rec
+        tmp = d / ".meta.tmp"
+        tmp.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        os.replace(tmp, d / "meta.json")
+        return True, f"session {key}: {state}"
 
     def purge_session(self, key: str) -> tuple[bool, str]:
         d = self._session_dir(key)
@@ -493,6 +510,9 @@ def make_handler(state: AdminState):
                 if method == "DELETE" and not sub:
                     ok, msg = state.purge_session(key)
                     return self._json(200 if ok else 409, {"ok": ok, "message": msg})
+                if method == "POST" and sub == "arm":
+                    ok, msg = state.arm_session(key, str(self._body().get("state", "")))
+                    return self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 if method == "DELETE" and sub == "placeholders":
                     ok, msg = state.purge_placeholders(key)
                     return self._json(200 if ok else 409, {"ok": ok, "message": msg})

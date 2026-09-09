@@ -169,7 +169,15 @@ class Session:
         self.meta.setdefault("last_compaction", None)
         self._save_meta()
 
+    def _meta_stamp(self):
+        try:
+            st = self.meta_path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
     def _load_meta(self) -> dict:
+        self._meta_seen = self._meta_stamp()
         if self.meta_path.is_file():
             try:
                 return json.loads(self.meta_path.read_text(encoding="utf-8"))
@@ -181,6 +189,33 @@ class Session:
         tmp = self.dir / ".meta.tmp"
         tmp.write_text(json.dumps(self.meta, indent=1), encoding="utf-8")
         os.replace(tmp, self.meta_path)
+        self._meta_seen = self._meta_stamp()
+
+    def reload_meta_if_changed(self) -> bool:
+        """Pick up a change another process made to meta.json (the admin app arming a session)."""
+        if self._meta_stamp() == getattr(self, "_meta_seen", None):
+            return False
+        self.meta = self._load_meta()
+        return True
+
+    # ---- the opt-in gate ------------------------------------------------------
+
+    def armed_state(self) -> str | None:
+        rec = self.meta.get("armed")
+        return rec.get("state") if isinstance(rec, dict) else None
+
+    def set_armed(self, state: str | None, source: str) -> None:
+        rec = dict(self.meta.get("armed") or {}) if isinstance(self.meta.get("armed"), dict) else {}
+        rec.update({"state": state, "source": source, "ts": _now_iso()})
+        self.meta["armed"] = rec
+        self._save_meta()
+
+    def bump_armed_asks(self) -> int:
+        rec = dict(self.meta.get("armed") or {}) if isinstance(self.meta.get("armed"), dict) else {}
+        rec["asked"] = int(rec.get("asked") or 0) + 1
+        self.meta["armed"] = rec
+        self._save_meta()
+        return rec["asked"]
 
     @property
     def mode(self) -> str:

@@ -30,6 +30,7 @@ package.
 ## Contents
 
 - [How it works](#how-it-works)
+- [Turning it on — nothing happens without the user's say-so](#turning-it-on--nothing-happens-without-the-users-say-so)
 - [The two modes and when the caller calls](#the-two-modes-and-when-the-caller-calls)
 - [Tools](#tools)
 - [The privacy boundary](#the-privacy-boundary)
@@ -82,6 +83,23 @@ caller that needs code or configuration text cannot act on a paraphrase. With
 task refers to; the server then copies those lines out of the material exactly (still
 scrubbed on the way out). The model's judgement chooses the region; it never rewrites a
 character of it.
+
+## Turning it on — nothing happens without the user's say-so
+
+The server never starts intercepting on its own. At connect time the model sees only the
+offer: what the server can do and that it is **off until the user turns it on**. The first time
+the model calls a working tool — or calls `local_llm_enable` to offer it — the server asks the
+**user** directly through MCP elicitation (Claude Code shows a dialog naming the tool that was
+attempted, never its arguments): turn it on for this session, turn it on in PII mode, or keep it
+off. Only then does anything run; the result of that first call carries the full operating rules.
+
+- **off** is remembered for the session; further calls return a refusal and the model is told not
+  to ask again. A cancelled dialog refuses that call and may ask again later (three times at most).
+- A client that **cannot show a dialog** is refused, with the text telling the model how the user
+  can enable the server: `LOCAL_LLM_MCP_ARM=on` in that client's MCP configuration for the server
+  (the user's standing approval for that client), or the **turn on** switch on the session's row in
+  the admin app. Those two, and the dialog, are the only ways the gate is ever passed.
+- `local_llm_status` is the one tool that answers while off (it shows the gate's state).
 
 ## The two modes and when the caller calls
 
@@ -162,6 +180,13 @@ size, compaction count and time, placeholder counts by kind, artifact count, the
 scrubbed summary, control-socket path, observer name.
 
 The block also carries `tokens_saved`: the estimate for this session and for all sessions (see [Tokens saved](#tokens-saved)).
+
+### `local_llm_enable`
+
+`local_llm_enable()` offers the server to the user: the server shows the dialog and returns the
+operating rules if the user turns it on, or a refusal. The model should call it once, when a step
+would print far more than it needs or would touch private data, and never again in a session where
+the user said no. Every other working tool asks the same question on its first use.
 
 ### `local_llm_disclosure`
 
@@ -404,9 +429,10 @@ What you lose without Claude Code's hooks, and what replaces it:
   **resource** (`local-llm://instructions`), and the routing rules are written into the tool
   descriptions, which every client shows. For a harness that reads an instructions file
   (`AGENTS.md`, a system prompt), paste the ASSIST or PII text from `local_llm_status`.
-- **The disclosure dialog** needs a client that supports MCP elicitation (Claude Code does). A
-  client without it gets the `auto` behaviour: masked, with a note telling the model to call
-  `local_llm_disclosure` when the user decides.
+- **The turn-on and disclosure dialogs** need a client that supports MCP elicitation (Claude Code
+  does). Without it, the server refuses to start until the user sets `LOCAL_LLM_MCP_ARM=on` in that
+  client's server configuration (their explicit approval), and disclosure falls back to `auto`:
+  masked, with a note telling the model to call `local_llm_disclosure` when the user decides.
 
 One server process serves one conversation; that is the isolation model behind the vault. Do
 not put it behind a multi-user MCP gateway (a shared mcpo instance serving a chat UI, say): every
@@ -443,6 +469,7 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | `120` | default command timeout, seconds |
 | `LOCAL_LLM_MCP_STRICT_PII` | `0` | treat every bare 10-digit run as a phone number (default: only formatted numbers or ones near phone words) |
 | `LOCAL_LLM_MCP_ENTITY_PASS` | `1` | PII mode: ask the worker for the private values before answering |
+| `LOCAL_LLM_MCP_ARM` | `ask` | the opt-in gate: `ask` = the user is asked in a dialog on first use (a client without one is refused); `on` = the user's standing approval for this client configuration |
 | `LOCAL_LLM_MCP_ESCALATION` | `ask` | first identity/number values in an ASSIST session: `ask` the user (dialog), `auto` (mask and tell the caller), `off` (show identity values) |
 | `LOCAL_LLM_MCP_ASSIST_NUMBERS` | `masked` | whether account/card/id numbers and dates of birth are shown in ASSIST before the user decides |
 | `LOCAL_LLM_MCP_DIALOG_TIMEOUT` | `600` | seconds to wait for the disclosure dialog before masking that result |

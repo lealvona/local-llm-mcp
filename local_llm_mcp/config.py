@@ -169,6 +169,7 @@ class Config:
     strict_pii: bool
     entity_pass: bool
     escalation: str
+    arm: str
     assist_numbers: str
     dialog_timeout: float
     shapes: bool
@@ -194,6 +195,9 @@ class Config:
         fallback_base_url = (_env("FALLBACK_BASE_URL", "") or "").strip().rstrip("/")
         if fallback_base_url:
             assert_local_endpoint(fallback_base_url)
+        arm = (_env("ARM", "ask") or "ask").strip().lower()
+        if arm not in ("ask", "on"):
+            raise ConfigError(f"{ENV_PREFIX}ARM must be 'ask' (default: the user is asked in a dialog) or 'on' (the user's standing approval for this client), got {arm!r}")
         escalation = (_env("ESCALATION", "ask") or "ask").strip().lower()
         if escalation not in ESCALATIONS:
             raise ConfigError(f"{ENV_PREFIX}ESCALATION must be one of {ESCALATIONS}, got {escalation!r}")
@@ -224,6 +228,7 @@ class Config:
             strict_pii=_bool("STRICT_PII", False),
             entity_pass=_bool("ENTITY_PASS", True),
             escalation=escalation,
+            arm=arm,
             assist_numbers=assist_numbers,
             dialog_timeout=_float("DIALOG_TIMEOUT", 600.0),
             shapes=_bool("SHAPES", True),

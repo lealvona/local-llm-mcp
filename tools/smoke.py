@@ -65,10 +65,19 @@ async def main() -> int:
     t_all = time.monotonic()
     import mcp.types as mtypes
     asked: list[str] = []
+    armed_asks: list[str] = []
     answer = ["continue"]  # what the "user" picks in the disclosure dialog
+    arm_answer = ["on"]    # what the "user" picks in the turn-on dialog
 
     async def on_elicit(context, req):
-        asked.append(str(getattr(req, "message", "")))
+        msg = str(getattr(req, "message", ""))
+        if "is OFF in this session" in msg:  # the opt-in gate
+            armed_asks.append(msg)
+            a = arm_answer[0]
+            if a in ("cancel", "decline"):
+                return mtypes.ElicitResult(action=a)
+            return mtypes.ElicitResult(action="accept", content={"choice": a})
+        asked.append(msg)
         a = answer[0]
         if a in ("cancel", "decline"):
             return mtypes.ElicitResult(action=a)
@@ -79,12 +88,12 @@ async def main() -> int:
             init = await s.initialize()
             instr = init.instructions or ""
             print(f"[init] server={init.serverInfo.name} instructions={len(instr)} chars")
-            check("ACTIVE MODE: PII" in instr, "instructions carry the active mode")
+            check("OFF until the user turns it on" in instr and "mode PII" in instr, "connect-time instructions are the opt-in gate and carry the mode")
             tools = await s.list_tools()
             names = sorted(t.name for t in tools.tools)
             print("[tools]", names)
-            check(names == ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_disclosure", "local_llm_run",
-                            "local_llm_set_mode", "local_llm_status"], "seven tools registered")
+            check(names == ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_disclosure", "local_llm_enable", "local_llm_run",
+                            "local_llm_set_mode", "local_llm_status"], "eight tools registered")
 
             st = json.loads(text(await s.call_tool("local_llm_status", {})))
             print(f"[status] key={st['session_key']} mode={st['mode']} sock={st['control_socket']}")
@@ -185,6 +194,15 @@ async def main() -> int:
             res = ctl(before["control_socket"], {"op": "status"})
             check(res.get("mode") == "assist", "control socket sees the new mode")
 
+            # ---- the opt-in gate: the first working call asked the user, and the rules came back with the result
+            check(len(armed_asks) == 1 and "local_llm_" in armed_asks[0] and "OFF in this session" in armed_asks[0],
+                  "first working call asked the user to turn the server on (dialog, tool named, no arguments)")
+            st = json.loads(text(await s.call_tool("local_llm_status", {})))
+            check(st["armed"]["state"] == "on" and st["armed"]["source"] == "dialog" and st["armed"]["policy"] == "ask",
+                  "status shows the session turned on by the user")
+            init = s.get_server_capabilities() is not None
+            check(init, "server capabilities visible")
+
             # ---- generic clients: the instructions are also a prompt and a resource; the session knows its client
             pr = await s.list_prompts()
             check(any(x.name == "local_llm_instructions" for x in pr.prompts), "instructions available as an MCP prompt")
@@ -229,6 +247,29 @@ async def main() -> int:
             st = json.loads(text(await s.call_tool("local_llm_status", {})))
             check(len(asked) == 3 and "[EMAIL-" in out and "switched this session to PII mode" in out and st["mode"] == "pii"
                   and "ACTIVE MODE: PII" in out, "choosing 'switch' moves the session to PII mode and returns the new instructions")
+
+    # ---- the gate refuses: (a) the user says off, (b) the client cannot ask
+    async def gate_case(session_key: str, callback):
+        env2 = {**env, "LOCAL_LLM_MCP_SESSION": session_key}
+        p2 = StdioServerParameters(command=sys.executable, args=["-m", "local_llm_mcp"], env=env2)
+        async with stdio_client(p2) as (r2, w2):
+            kw = {"elicitation_callback": callback} if callback else {}
+            async with ClientSession(r2, w2, **kw) as s2:
+                await s2.initialize()
+                out = text(await s2.call_tool("local_llm_run", {"command": "printf 'must not run\\n'"}))
+                st2 = json.loads(text(await s2.call_tool("local_llm_status", {})))
+                out_again = text(await s2.call_tool("local_llm_delegate", {"task": "x", "material": "y"}))
+                return out, st2, out_again
+
+    async def say_off(context, req):
+        return mtypes.ElicitResult(action="accept", content={"choice": "off"})
+
+    out, st2, again = await gate_case("smoke-gate-off", say_off)
+    check("OFF" in out and "Nothing was done" in out and st2["armed"]["state"] == "off" and st2["turns_total"] == 0
+          and "OFF" in again, "user says off: refused, nothing ran, remembered, not asked again")
+    out, st2, again = await gate_case("smoke-gate-nodialog", None)
+    check("cannot show the user a dialog" in out and "LOCAL_LLM_MCP_ARM=on" in out and st2["turns_total"] == 0
+          and st2["armed"].get("state") is None, "client without elicitation: refused with the way to enable, nothing ran")
 
     import json as _json, pathlib as _pl  # the server flushes its token measurements at shutdown; read the ledger after
     ledger = _pl.Path(str(state)) / "savings.jsonl"
