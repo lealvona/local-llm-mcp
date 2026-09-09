@@ -182,7 +182,7 @@ class App:
         found = await asyncio.gather(*(one(a, b) for a, b in windows))
         ranges = vb.merge_ranges([r for part in found for r in part], total)
         if not ranges:
-            return "(no lines matched the task)", []
+            return "", []  # nothing to quote: the caller falls back to a digest
         label = source if not source.startswith(("paths:", "inline")) and ";" not in source else f"combined material ({source})"
         text, left = vb.quote(lines, ranges, label, max_output_chars)
         return text, left
@@ -266,6 +266,7 @@ class App:
             override: Policy | None = None
             notice = ""
             decision = ""
+            fallback = False  # verbatim asked for, nothing matched, digested instead
             if mode == "assist" and detected_tiers(counts) and self.session.disclosure.identity == "undecided":
                 try:
                     override, notice, decision = await self.decide(ctx, counts, source)
@@ -276,6 +277,14 @@ class App:
                 if verbatim and material:
                     answer, left_out = await work
                     usage = None
+                    if not answer:
+                        # A locate pass that matches nothing almost always means the task was a
+                        # question, not a reproduction. Answer it rather than return nothing.
+                        fallback, verbatim = True, False
+                        answer, usage = await self.llm.digest(
+                            system, self.inbound(task), material, source,
+                            max_output_chars=max_output_chars,
+                            render_user=prompts.render_user, render_reduce=prompts.render_reduce)
                 else:
                     answer, usage = await work
                 if not verbatim and prompts.needs_finalize(answer):
@@ -301,7 +310,7 @@ class App:
                 "result": scrubbed.text[:6000] if not error else f"ERROR: {error[:500]}",
                 "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text), "secs": secs,
                 "model": self.llm.last_model, "error": bool(error),
-                **({"disclosure": decision} if decision else {}), **extra,
+                **({"disclosure": decision} if decision else {}), **({"verbatim_fallback": True} if fallback else {}), **extra,
             }
             tid = self.session.append_turn(turn)
             turn["id"] = tid  # append_turn writes a copy; the ledger row must carry the same id (backfill dedupes on it)
@@ -312,7 +321,8 @@ class App:
                 "mode": mode, "turn": tid, "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text),
                 "secs": secs, "model": self.llm.last_model, "rc": extra.get("rc"), "error": bool(error),
                 "scrubbed": scrubbed.replaced, "chunks": getattr(usage, "chunks", 1) if usage else 0,
-                "finalized": finalized, "entities": entities, "verbatim": verbatim, "session": self.session.key,
+                "finalized": finalized, "entities": entities, "verbatim": verbatim, "verbatim_fallback": fallback,
+                "session": self.session.key,
                 "saved_tokens": saved, "gathered_chars": int(extra.get("gathered_chars") or 0),
                 "disclosure": decision or None,
             })
@@ -326,6 +336,7 @@ class App:
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
                 ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
+                "verbatim: no lines matched, digested instead" if fallback else "",
                 self.llm.last_model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "",
                 f"disclosure: {decision}" if decision else "", scrubbed.trailer(),
             ])

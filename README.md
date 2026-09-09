@@ -123,7 +123,7 @@ output capped) and receive a digest of its output. Raw output is kept as an arti
 | `cwd` | string | server cwd | working directory |
 | `timeout_s` | int | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | kill after |
 | `max_output_chars` | int | `LOCAL_LLM_MCP_MAX_OUTPUT_CHARS` | soft digest budget |
-| `verbatim` | bool | `false` | copy the matching output lines byte for byte instead of digesting — only for text you will reproduce or edit; never for questions, counts, summaries or listings |
+| `verbatim` | bool | `false` | copy the matching output lines byte for byte instead of digesting — only for text you will reproduce or edit; never for questions, counts, summaries or listings. If nothing matches, the turn is digested instead and the trailer says so |
 
 A timeout or non-zero exit is reported inside the digest and in the trailer.
 
