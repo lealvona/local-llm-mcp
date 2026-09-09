@@ -129,6 +129,17 @@ def test_history_scan_without_an_identity_checks_everything_else(repo):
     assert "no user.email" not in r.stderr  # the missing identity is a note, not a refusal, in a history scan
 
 
+def test_installer_is_scoped_to_this_repository(tmp_path):
+    """The gate is per-clone: the installer refuses any other repository and never writes global config."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(other)], check=True, env=env)
+    r = subprocess.run(["bash", str(ROOT / "tools/install-hooks.sh"), "--autopush"], cwd=other, env=env, capture_output=True, text=True)
+    assert r.returncode == 2 and "not the local-llm-mcp repository" in r.stderr
+    assert subprocess.run(["git", "config", "--local", "--get", "core.hooksPath"], cwd=other, env=env, capture_output=True).returncode != 0
+    assert not (tmp_path / "gitconfig").exists() or "hooksPath" not in (tmp_path / "gitconfig").read_text()
+
+
 def test_this_repository_history_is_clean():
     r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
