@@ -66,9 +66,11 @@ def _check(cfg: Config) -> int:
             results = await llm.probe()
             for r in results:
                 if r["ok"]:
-                    n = await llm.count_tokens("token count probe: 12 Sample Street") if r["backend"] == llm.order()[0].name else None
-                    print(f"model {r['model']} at {r['endpoint']} ({r['backend']}): {r['text']!r} usage={r['usage']}"
-                          + (f"; tokenize: {n} tokens" if n is not None else "; tokenize: unavailable (chars estimate)"),
+                    note = ""
+                    if r["backend"] == llm.order()[0].name:
+                        n = await llm.count_tokens("token count probe: 12 Sample Street")
+                        note = f"; tokenize: {n} tokens" if n is not None else "; tokenize: unavailable (chars estimate)"
+                    print(f"model {r['model']} at {r['endpoint']} ({r['backend']}): {r['text']!r} usage={r['usage']}{note}",
                           file=sys.stderr)
                 else:
                     print(f"model {r['model']} at {r['endpoint']} ({r['backend']}) FAILED: {r['error']}", file=sys.stderr)
