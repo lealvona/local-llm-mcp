@@ -108,15 +108,15 @@ def default_sock_dir() -> str:
     return os.path.expanduser("~/.local/state/local-llm-mcp/sock")
 
 
-def _load_api_key() -> str:
-    key = (_env("API_KEY") or "").strip()
+def _load_api_key(prefix: str = "") -> str:
+    key = (_env(prefix + "API_KEY") or "").strip()
     if key:
         return key
-    key_file = _env("API_KEY_FILE")
+    key_file = _env(prefix + "API_KEY_FILE")
     if key_file:
         p = Path(key_file).expanduser()
         if not p.is_file():
-            raise ConfigError(f"{ENV_PREFIX}API_KEY_FILE={p} does not exist")
+            raise ConfigError(f"{ENV_PREFIX}{prefix}API_KEY_FILE={p} does not exist")
         return p.read_text(encoding="utf-8").strip()
     return ""
 
@@ -149,6 +149,10 @@ class Config:
     base_url: str
     model: str
     api_key: str
+    fallback_base_url: str
+    fallback_model: str
+    fallback_api_key: str
+    failover_cooldown: float
     thinking: bool
     max_output_chars: int
     max_tokens_cap: int
@@ -183,11 +187,18 @@ class Config:
             raise ConfigError(f"{ENV_PREFIX}MODE must be one of {MODES}, got {mode!r}")
         base_url = (_env("BASE_URL", "http://127.0.0.1:8000/v1") or "").rstrip("/")
         assert_local_endpoint(base_url)
+        fallback_base_url = (_env("FALLBACK_BASE_URL", "") or "").strip().rstrip("/")
+        if fallback_base_url:
+            assert_local_endpoint(fallback_base_url)
         return cls(
             mode=mode,
             base_url=base_url,
             model=_env("MODEL", "local") or "local",
             api_key=_load_api_key(),
+            fallback_base_url=fallback_base_url,
+            fallback_model=(_env("FALLBACK_MODEL") or "").strip(),
+            fallback_api_key=_load_api_key("FALLBACK_") if fallback_base_url else "",
+            failover_cooldown=_float("FAILOVER_COOLDOWN", 120.0),
             thinking=_bool("THINKING", False),
             max_output_chars=_int("MAX_OUTPUT_CHARS", 2000),
             max_tokens_cap=_int("MAX_TOKENS_CAP", 8192),
@@ -220,4 +231,5 @@ class Config:
         """Config as safe to show a caller: never the key."""
         d = {k: (str(v) if isinstance(v, Path) else v) for k, v in self.__dict__.items()}
         d["api_key"] = "set" if self.api_key else "unset"
+        d["fallback_api_key"] = "set" if self.fallback_api_key else "unset"
         return d

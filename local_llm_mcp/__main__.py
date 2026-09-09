@@ -54,7 +54,8 @@ def _check(cfg: Config) -> int:
           f"identity shapes: {'on' if scrub.shapes else 'off'}; observer: {load_observer(cfg).name}", file=sys.stderr)
     from .savings import Prices
     prices = Prices(cfg.prices_path, cfg.caller_model)
-    print(f"prices: {len(prices.models)} models (checked {prices.doc.get('checked')}), headline {prices.caller_model() or '-'}, "
+    print(f"prices: {len(prices.models)} models (checked {prices.doc.get('checked')}, {prices.age_days()} days old"
+          f"{', STALE' if prices.stale() else ''}), headline {prices.caller_model() or '-'}, "
           f"override {'present' if prices.override_present else 'absent'} at {cfg.prices_path}", file=sys.stderr)
     s = Session(cfg)
     print(f"session: key={s.key} claude_pid={s.claude_pid} dir={s.dir}", file=sys.stderr)
@@ -62,12 +63,16 @@ def _check(cfg: Config) -> int:
     async def probe() -> int:
         llm = LocalLLM(cfg)
         try:
-            text, usage = await llm.chat("Reply with exactly: OK", "ping", max_tokens=16)
-            print(f"model {cfg.model} at {cfg.base_url}: {text!r} usage={usage}", file=sys.stderr)
-            return 0
-        except LLMError as exc:
-            print(f"model probe FAILED: {exc}", file=sys.stderr)
-            return 1
+            results = await llm.probe()
+            for r in results:
+                if r["ok"]:
+                    n = await llm.count_tokens("token count probe: 12 Sample Street") if r["backend"] == llm.order()[0].name else None
+                    print(f"model {r['model']} at {r['endpoint']} ({r['backend']}): {r['text']!r} usage={r['usage']}"
+                          + (f"; tokenize: {n} tokens" if n is not None else "; tokenize: unavailable (chars estimate)"),
+                          file=sys.stderr)
+                else:
+                    print(f"model {r['model']} at {r['endpoint']} ({r['backend']}) FAILED: {r['error']}", file=sys.stderr)
+            return 0 if any(r["ok"] for r in results) else 1
         finally:
             await llm.aclose()
 

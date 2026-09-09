@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pytest
+      - name: Compile every source file
+        run: python -m py_compile local_llm_mcp/*.py hooks/*.py tools/*.py
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Admin SPA syntax
+        run: |
+          sed -n '/<script>/,/<\/script>/p' local_llm_mcp/admin/index.html | sed '1d;$d' > /tmp/spa.js
+          node --check /tmp/spa.js
+      - name: Nothing deployment-specific in the tree
+        run: python tools/publiccheck.py

@@ -1,5 +1,7 @@
 # local-llm-mcp
 
+[![tests](https://github.com/lealvona/local-llm-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/lealvona/local-llm-mcp/actions/workflows/tests.yml)
+
 **A local worker model for your cloud model.** `local-llm-mcp` is an
 [MCP](https://modelcontextprotocol.io) server that sits between a calling model
 (Claude Code, or any MCP client) and an LLM running on your own network. The caller
@@ -258,6 +260,14 @@ estimates what the caller did not have to spend, per session and across all sess
 | avoided output | tokens(returned) × `output_credit[kind]` | for a delegation the worker wrote the answer the caller would otherwise have generated (credit 1.0); a digest of command output (0) and verbatim quoting (0) replace reading, not writing |
 | carried | avoided input × `context_reuse_calls` | every token that enters the caller's context is re-sent on each later model call until compaction; priced at the model's cache-read rate where it has one, else at the input rate |
 
+Token counts are **exact where the worker can count**: after each result is returned, the server asks
+the worker's own tokenize endpoint (vLLM's `POST /tokenize`, or llama.cpp's) for the token count
+of what it gathered and of what it returned, in the background, and records both in the ledger. A
+worker with no such endpoint, or a turn that outlives the process, falls back to characters ÷
+`chars_per_token`; the report says how many turns were measured. The counts are the worker
+tokenizer's, not the caller model's — a different vocabulary tokenizes the same text a little
+differently, and that residual is not corrected.
+
 Dollars are **list prices** per 1M tokens for flagship models of every major provider, read
 from the providers' own pricing pages and stamped with the date they were checked
 (`local_llm_mcp/prices.json`). They are an equivalent, not an invoice: on a subscription the
@@ -273,13 +283,15 @@ Where it shows:
   the assumptions and prices.
 
 Everything is configurable and applies retroactively, because the ledger stores characters,
-not tokens: `chars_per_token` (default 3.8 — deliberately conservative: Anthropic states that Claude 4.7
+not tokens: `chars_per_token` (only for unmeasured turns; default 3.8 — deliberately conservative: Anthropic states that Claude 4.7
 and later use a tokenizer producing roughly 30 % more tokens for the same text, so for those models the
 true figure is nearer 3, and the estimate understates the saving), `context_reuse_calls` (default 8), the output
 credits, and the headline model (`caller_model`, or `LOCAL_LLM_MCP_CALLER_MODEL`). Edits go to
 the override file `LOCAL_LLM_MCP_PRICES` (default `~/.config/local-llm-mcp/prices.json`),
 which merges over the package defaults by model id, can add models or disable one
 (`"enabled": false`), and is hot-reloaded. The admin tab writes that file; "reset" removes it.
+Prices go stale: the tab, the status block and `--check` flag the table once its `checked` date is
+older than `stale_after_days` (default 30), so re-check the providers' pages and save.
 The cross-session ledger is `<state>/savings.jsonl`, append-only, one line per counted turn;
 it survives session purges. Sessions recorded before the ledger existed can be added from their
 context logs with `local-llm-mcp-admin --backfill-savings` (or the button on the tab); the
@@ -334,6 +346,10 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_MODE` | `assist` | `pii` or `assist` |
 | `LOCAL_LLM_MCP_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint; must be local |
 | `LOCAL_LLM_MCP_MODEL` | `local` | model name sent to the endpoint |
+| `LOCAL_LLM_MCP_FALLBACK_BASE_URL` | unset | a second local worker used when the primary is unreachable or answers 5xx (must be local too) |
+| `LOCAL_LLM_MCP_FALLBACK_MODEL` | primary model | model name at the fallback |
+| `LOCAL_LLM_MCP_FALLBACK_API_KEY` / `_FALLBACK_API_KEY_FILE` | unset | its key |
+| `LOCAL_LLM_MCP_FAILOVER_COOLDOWN` | `120` | seconds the fallback is asked first after the primary fails |
 | `LOCAL_LLM_MCP_API_KEY` / `LOCAL_LLM_MCP_API_KEY_FILE` | unset | bearer for the endpoint (file: one line, keep it 0600) |
 | `LOCAL_LLM_MCP_THINKING` | `0` | pass `enable_thinking` to the chat template. Off is right for most local models: a reasoning budget can consume the whole `max_tokens` and return empty content |
 | `LOCAL_LLM_MCP_MAX_OUTPUT_CHARS` | `2000` | default digest budget; `max_tokens` is derived from it |

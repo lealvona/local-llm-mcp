@@ -164,6 +164,7 @@ class AdminState:
                 "turns": meta.get("turns", 0), "compactions": meta.get("compactions", 0),
                 "last_compaction": meta.get("last_compaction"), "claude_session_id": meta.get("claude_session_id", ""),
                 "claude_pid": meta.get("claude_pid"), "live": self._is_live(meta),
+                "previous_keys": list(meta.get("previous_keys") or []),
                 "placeholders": vault.counts(), "placeholder_total": len(vault.by_placeholder),
                 "artifacts": len(list((d / "artifacts").glob("a_*.txt"))) if (d / "artifacts").is_dir() else 0,
                 "bytes": _dir_size(d), "summary_chars": (d / "summary.md").stat().st_size if (d / "summary.md").is_file() else 0,
@@ -291,15 +292,29 @@ class AdminState:
         a = self.prices.assumptions
         caller = self.prices.caller_model()
         cm = self.prices.model(caller)
+        meta = {s["key"]: s for s in self.sessions()}
+        by = self.ledger.by_session()
+        # A session that changed key keeps its old rows attributable: fold aliases in.
+        alias: dict[str, str] = {}
+        for key, s in meta.items():
+            for old in s.get("previous_keys") or []:
+                alias[old] = key
+        folded: dict[str, list[dict]] = {}
+        for key, recs in by.items():
+            folded.setdefault(alias.get(key, key), []).extend(recs)
         rows = []
-        for s in self.sessions():
-            agg = aggregate(self._turns_of(self._session_dir(s["key"])), a)
+        for key, recs in folded.items():
+            agg = aggregate(recs, a)
             c = cost(agg, cm) if cm else {}
-            rows.append({"key": s["key"], "mode": s["mode"], "live": s["live"], "last_seen": s["last_seen"], **agg, **c})
+            m = meta.get(key) or {}
+            rows.append({"key": key, "mode": m.get("mode", "?"), "live": bool(m.get("live")),
+                         "last_seen": m.get("last_seen") or max((r.get("ts") or "" for r in recs), default=None),
+                         "purged": key not in meta, **agg, **c})
         rows.sort(key=lambda r: r.get("with_carry_usd", 0), reverse=True)
         all_time = self.ledger.totals(a)
         per_model = costs(all_time, self.prices)
         return {"caller_model": caller, "assumptions": a, "prices_checked": self.prices.doc.get("checked", ""),
+                "prices_age_days": self.prices.age_days(), "prices_stale": self.prices.stale(),
                 "all_time": {**all_time, "cost": per_model.get(caller)},
                 "per_model": {mid: {"all_time_direct_usd": v["direct_usd"], "all_time_usd": v["with_carry_usd"]}
                               for mid, v in per_model.items()},
@@ -309,6 +324,7 @@ class AdminState:
         self.prices.reload()
         return {**self.prices.doc, "override_path": str(self.cfg.prices_path),
                 "override_present": self.prices.override_present,
+                "age_days": self.prices.age_days(), "stale": self.prices.stale(),
                 "defaults_checked": self.prices.defaults.get("checked", ""),
                 "default_model_ids": [m.get("model_id") for m in self.prices.defaults.get("models", [])]}
 
@@ -343,6 +359,7 @@ class AdminState:
         agg = self.ledger.totals(a)
         cm = self.prices.model(caller)
         return {"caller_model": caller, "turns": agg["turns"], "sessions": agg["sessions"],
+                "measured_turns": agg["measured_turns"], "prices_stale": self.prices.stale(),
                 "avoided_input": agg["avoided_input"], "avoided_output": agg["avoided_output"], "carried": agg["carried"],
                 **(cost(agg, cm) if cm else {"direct_usd": 0.0, "carried_usd": 0.0, "with_carry_usd": 0.0})}
 

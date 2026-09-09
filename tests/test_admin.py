@@ -16,7 +16,8 @@ def server(tmp_path, monkeypatch):
     state = tmp_path / "state"
     (state / "sessions" / "sess-1" / "artifacts").mkdir(parents=True)
     d = state / "sessions" / "sess-1"
-    (d / "meta.json").write_text(json.dumps({"key": "sess-1", "mode": "pii", "turns": 2, "compactions": 1, "claude_pid": 999999}))
+    (d / "meta.json").write_text(json.dumps({"key": "sess-1", "mode": "pii", "turns": 2, "compactions": 1, "claude_pid": 999999,
+                                             "previous_keys": ["pid-1"]}))
     (d / "placeholders.json").write_text(json.dumps({"placeholders": {"[EMAIL-1]": {"kind": "EMAIL", "value": "a@example.org"}}}))
     (d / "context.jsonl").write_text(json.dumps({"id": "t_1", "kind": "delegate", "task": "x", "result": "[EMAIL-1] ok"}) + "\n"
                                      + json.dumps({"id": "t_2", "kind": "run", "task": "y", "result": "ok", "gathered_chars": 38000, "out_chars": 1900}) + "\n")
@@ -30,7 +31,9 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_LLM_MCP_PRICES", str(tmp_path / "prices-override.json"))
     (state / "savings.jsonl").write_text(
         json.dumps({"ts": "2026-09-01T00:00:00", "session": "sess-1", "kind": "run", "gathered_chars": 38000, "out_chars": 1900}) + "\n"
-        + json.dumps({"ts": "2026-09-02T00:00:00", "session": "gone", "kind": "delegate", "gathered_chars": 0, "out_chars": 760}) + "\n")
+        + json.dumps({"ts": "2026-09-02T00:00:00", "session": "gone", "kind": "delegate", "gathered_chars": 0, "out_chars": 760}) + "\n"
+        + json.dumps({"ts": "2026-08-30T00:00:00", "session": "pid-1", "kind": "run", "gathered_chars": 3800, "out_chars": 190,
+                      "gathered_tokens": 1000, "returned_tokens": 50}) + "\n")
     monkeypatch.delenv("LOCAL_LLM_MCP_RULES", raising=False)
     cfg = Config.from_env()
     srv = make_server("127.0.0.1", 0, cfg, "tok-secret")
@@ -103,13 +106,18 @@ def test_traversal_and_bad_keys_refused(server):
 
 def test_savings_and_prices_api(server):
     code, d = call(server, "GET", "/api/savings")
-    assert code == 200 and d["all_time"]["turns"] == 2 and d["all_time"]["sessions"] == 2
-    assert d["all_time"]["avoided_input"] == 9500 and d["all_time"]["avoided_output"] == 200  # 3.8 chars/token
+    assert code == 200 and d["all_time"]["turns"] == 3 and d["all_time"]["sessions"] == 3
+    assert d["all_time"]["avoided_input"] == 9500 + 950 and d["all_time"]["avoided_output"] == 200  # 3.8 chars/token + one measured
+    assert d["all_time"]["measured_turns"] == 1 and d["prices_stale"] is False and d["prices_age_days"] is not None
     assert d["caller_model"] and d["all_time"]["cost"]["with_carry_usd"] > 0
     row = next(r for r in d["sessions"] if r["key"] == "sess-1")
-    assert row["turns"] == 2 and row["avoided_input"] == 9500 and row["with_carry_usd"] > 0
+    assert row["turns"] == 2 and row["avoided_input"] == 9500 + 950 and row["with_carry_usd"] > 0 and not row["purged"]
+    assert not any(r["key"] == "pid-1" for r in d["sessions"])  # folded into sess-1 through previous_keys
+    gone = next(r for r in d["sessions"] if r["key"] == "gone")
+    assert gone["purged"] and gone["mode"] == "?" and gone["avoided_output"] == 200
     code, p = call(server, "GET", "/api/prices")
     assert code == 200 and not p["override_present"] and len(p["models"]) >= 20 and p["default_model_ids"]
+    assert p["stale"] is False and isinstance(p["age_days"], int)
     first = p["models"][0]["model_id"]
     code, p2 = call(server, "POST", "/api/prices", {"assumptions": {"context_reuse_calls": 0, "caller_model": first},
                                                    "models": [{"model_id": first, "input_per_m": 100, "output_per_m": 1}]})
@@ -117,7 +125,7 @@ def test_savings_and_prices_api(server):
     assert next(m for m in p2["models"] if m["model_id"] == first)["input_per_m"] == 100
     code, d2 = call(server, "GET", "/api/savings")
     assert d2["caller_model"] == first and d2["all_time"]["carried"] == 0
-    assert d2["all_time"]["cost"]["direct_usd"] == round(9500 * 100 / 1e6 + 200 * 1 / 1e6, 4)
+    assert d2["all_time"]["cost"]["direct_usd"] == round(10450 * 100 / 1e6 + 200 * 1 / 1e6, 4)
     code, o = call(server, "GET", "/api/overview")
     assert code == 200 and o["savings"]["caller_model"] == first and o["savings"]["with_carry_usd"] == d2["all_time"]["cost"]["with_carry_usd"]
     code, p3 = call(server, "DELETE", "/api/prices")

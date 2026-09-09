@@ -223,12 +223,22 @@ class Session:
                 shutil.rmtree(self.dir, ignore_errors=True)
             else:
                 shutil.move(str(self.dir), str(target))
+        old_key = self.key
         self.key = session_id
         self.claude_session_id = session_id
         self.dir = target
         self._open_dir()
+        prev = [k for k in self.meta.get("previous_keys", []) if k != session_id]
+        if old_key not in prev:
+            prev.append(old_key)
+        self.meta["previous_keys"] = prev  # the savings ledger is keyed by session; keep the old rows attributable
+        self._save_meta()
         log.info("session adopted id %s", session_id)
         return True
+
+    def keys(self) -> list[str]:
+        """This session's key plus every key it was known by before (ledger attribution)."""
+        return [self.key] + [k for k in self.meta.get("previous_keys", []) if k != self.key]
 
     # ---- turns -------------------------------------------------------------
 

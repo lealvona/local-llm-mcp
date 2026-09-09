@@ -44,6 +44,7 @@ class App:
         self.observer = load_observer(cfg)
         self.prices = sv.Prices(cfg.prices_path, cfg.caller_model)
         self.ledger = sv.Ledger(cfg.state_dir / "savings.jsonl")
+        self.pending: dict[asyncio.Task, tuple[str, dict]] = {}  # token measurements in flight
         self.lock = asyncio.Lock()
         self.compacting: asyncio.Task | None = None
         self.control_server: asyncio.AbstractServer | None = None
@@ -94,11 +95,55 @@ class App:
         text, left = vb.quote(lines, ranges, label, max_output_chars)
         return text, left
 
+    def _measure(self, turn: dict, gathered_text: str, returned_text: str) -> None:
+        """Record the turn in the savings ledger with the worker's exact token counts,
+        measured in the background so the caller never waits on it. A failed or
+        cancelled measurement still records the turn (chars only)."""
+        key = self.session.key
+        if turn.get("error") or not (gathered_text or returned_text):
+            self.ledger.append(key, turn)
+            return
+
+        async def run() -> None:
+            gt = await self.llm.count_tokens(gathered_text) if gathered_text else 0
+            rt = await self.llm.count_tokens(returned_text) if returned_text else 0
+            self.ledger.append(key, {**turn, "gathered_tokens": gt, "returned_tokens": rt})
+
+        try:
+            task = asyncio.get_running_loop().create_task(run())
+        except RuntimeError:
+            self.ledger.append(key, turn)
+            return
+        self.pending[task] = (key, turn)
+
+        def done(t: asyncio.Task) -> None:
+            self.pending.pop(t, None)
+            if t.cancelled() or t.exception():
+                if not t.cancelled():
+                    log.warning("token measurement failed: %s", t.exception())
+                self.ledger.append(key, turn)
+
+        task.add_done_callback(done)
+
+    async def flush_measurements(self, timeout: float = 15.0) -> None:
+        """At shutdown: give in-flight measurements a moment, then record the rest unmeasured."""
+        tasks = list(self.pending)
+        if not tasks:
+            return
+        await asyncio.wait(tasks, timeout=timeout)
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def delegate(self, *, kind: str, task: str, material: str, source: str,
                        max_output_chars: int, extra: dict | None = None, verbatim: bool = False) -> str:
         t0 = time.monotonic()
         mode = self.mode
-        extra = extra or {}
+        extra = dict(extra or {})
+        gathered_text = extra.pop("_gathered_text", None)
+        if gathered_text is None:
+            gathered_text = material if kind == "run" else ""
         async with self.lock:
             # Everything detectable in the material gets a placeholder BEFORE the
             # worker sees it, so an exact echo in the answer is caught even
@@ -144,15 +189,15 @@ class App:
                 "verbatim": verbatim,
                 "result": scrubbed.text[:6000] if not error else f"ERROR: {error[:500]}",
                 "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text), "secs": secs,
-                "model": self.cfg.model, "error": bool(error), **extra,
+                "model": self.llm.last_model, "error": bool(error), **extra,
             }
             tid = self.session.append_turn(turn)
             est = sv.estimate_turn(turn, self.prices.assumptions)
             saved = est["avoided_input"] + est["avoided_output"]
-            self.ledger.append(self.session.key, turn)
+            self._measure(turn, gathered_text, scrubbed.text)
             self.observer.event("execute_tool", f"local_llm.{kind}", {
                 "mode": mode, "turn": tid, "ref": ref, "raw_chars": len(material), "out_chars": len(scrubbed.text),
-                "secs": secs, "model": self.cfg.model, "rc": extra.get("rc"), "error": bool(error),
+                "secs": secs, "model": self.llm.last_model, "rc": extra.get("rc"), "error": bool(error),
                 "scrubbed": scrubbed.replaced, "chunks": getattr(usage, "chunks", 1) if usage else 0,
                 "finalized": finalized, "entities": entities, "verbatim": verbatim, "session": self.session.key,
                 "saved_tokens": saved, "gathered_chars": int(extra.get("gathered_chars") or 0),
@@ -167,7 +212,7 @@ class App:
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
                 ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
-                self.cfg.model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "", scrubbed.trailer(),
+                self.llm.last_model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "", scrubbed.trailer(),
             ])
             result = scrubbed.text + trailer
         self.maybe_autocompact()
@@ -228,7 +273,7 @@ class App:
             self.session.meta["last_compaction"] = datetime.now().astimezone().isoformat(timespec="seconds")
             self.session.append_turn({"kind": "compaction", "task": reason, "mode": mode,
                                       "result": f"compacted {len(turns)} turns into {len(scrubbed.text)} chars",
-                                      "secs": secs, "model": self.cfg.model})
+                                      "secs": secs, "model": self.llm.last_model})
             self.observer.event("session", "compaction", {
                 "reason": reason[:120], "turns": len(turns), "summary_chars": len(scrubbed.text), "secs": secs,
                 "scrubbed": scrubbed.replaced, "session": self.session.key})
@@ -314,6 +359,10 @@ def build(cfg: Config) -> FastMCP:
         finally:
             app.observer.event("session", "end", {"session": app.session.key,
                                                     "turns": app.session.meta.get("turns", 0)})
+            try:
+                await app.flush_measurements()
+            except Exception as exc:
+                log.warning("measurement flush failed: %s", exc)
             await app.stop_control()
             try:
                 await app.observer.end("done")
@@ -395,6 +444,7 @@ def build(cfg: Config) -> FastMCP:
         sources: list[str] = []
         extra: dict = {}
         gathered = 0  # chars the caller did NOT already hold (command output, files)
+        gathered_parts: list[str] = []
         if material:
             pieces.append(material)
             sources.append(f"inline ({len(material)} chars)")
@@ -405,6 +455,7 @@ def build(cfg: Config) -> FastMCP:
                           + (res.output or "(no output)"))
             sources.append(f"command: {command[:120]}")
             gathered += len(res.output or "")
+            gathered_parts.append(res.output or "")
             extra.update({"rc": res.rc, "timed_out": res.timed_out, "cmd_secs": res.secs})
         if paths:
             expanded = [a.inbound(p) for p in paths]
@@ -418,6 +469,7 @@ def build(cfg: Config) -> FastMCP:
                 text, truncated_file = cap(raw, cfg.material_max_chars)
                 pieces.append(text)
                 gathered += len(text)
+                gathered_parts.append(text)
                 sources.append(_short_path(str(single)))
                 if truncated_file:
                     extra["truncated"] = True
@@ -425,12 +477,14 @@ def build(cfg: Config) -> FastMCP:
                 text, meta = read_paths(expanded, max_chars=cfg.material_max_chars, cwd=cwd or None)
                 pieces.append(text)
                 gathered += len(text)
+                gathered_parts.append(text)
                 sources.append("paths: " + ", ".join(_short_path(p) for p in expanded[:8]) + (" …" if len(expanded) > 8 else ""))
         joined = "\n\n".join(pieces)
         joined, truncated = cap(joined, cfg.material_max_chars)
         if truncated:
             extra["truncated"] = True
         extra["gathered_chars"] = gathered
+        extra["_gathered_text"] = "\n\n".join(gathered_parts)
         return await a.delegate(kind="delegate", task=task, material=joined, source="; ".join(sources) or "none",
                                 max_output_chars=_budget(max_output_chars), extra=extra, verbatim=verbatim)
 
@@ -473,7 +527,7 @@ def build(cfg: Config) -> FastMCP:
     @mcp.tool(
         name="local_llm_status",
         title="Show the worker's session state",
-        description="Mode, session identity, model, turns since compaction, context size, compaction count, placeholder counts, artifact count, and the tokens-saved estimate for this session and all sessions.",
+        description="Mode, session identity, worker (primary/fallback, which is active), turns since compaction, context size, compaction count, placeholder counts, artifact count, and the tokens-saved estimate for this session and all sessions.",
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
     async def local_llm_status() -> str:
@@ -484,7 +538,8 @@ def build(cfg: Config) -> FastMCP:
         st["observer"] = a.observer.name
         st["observer_run"] = a.observer.run_id or None
         st["compaction_in_progress"] = bool(a.compacting and not a.compacting.done())
-        st["tokens_saved"] = sv.report(a.session.turns(), a.ledger, a.prices)
+        st["worker"] = a.llm.worker_status()
+        st["tokens_saved"] = sv.report(a.session.keys(), a.ledger, a.prices, pending=len(a.pending))
         return json.dumps(st, indent=1)
 
     @mcp.tool(

@@ -20,7 +20,8 @@ def prices(tmp_path, over=None, caller=""):
 def test_estimate_by_kind():
     a = sv.Prices.merge({}, {"assumptions": ASSUME})["assumptions"]
     run = sv.estimate_turn({"kind": "run", "gathered_chars": 40000, "out_chars": 2000}, a)
-    assert run == {"gathered_tokens": 10000, "returned_tokens": 500, "avoided_input": 9500, "avoided_output": 0, "carried": 95000}
+    assert run == {"gathered_tokens": 10000, "returned_tokens": 500, "avoided_input": 9500, "avoided_output": 0, "carried": 95000,
+                   "measured": False}
     inline = sv.estimate_turn({"kind": "delegate", "gathered_chars": 0, "out_chars": 800}, a)
     assert (inline["avoided_input"], inline["avoided_output"], inline["carried"]) == (0, 200, 0)
     files = sv.estimate_turn({"kind": "delegate", "gathered_chars": 8000, "out_chars": 400}, a)
@@ -106,8 +107,12 @@ def test_report_shape(tmp_path):
     pr = prices(tmp_path, {"assumptions": ASSUME, "models": MODELS})
     led = sv.Ledger(tmp_path / "savings.jsonl")
     led.append("other", {"kind": "run", "gathered_chars": 4000, "out_chars": 400})
-    r = sv.report([{"kind": "run", "gathered_chars": 40000, "out_chars": 2000}], led, pr)
-    assert r["caller_model"] == "m-big" and r["session"]["avoided_input"] == 9500 and r["all_time"]["turns"] == 1
+    led.append("s1", {"kind": "run", "gathered_chars": 40000, "out_chars": 2000})
+    led.append("pid-9", {"kind": "run", "gathered_chars": 4000, "out_chars": 400, "gathered_tokens": 1000, "returned_tokens": 100})
+    r = sv.report(["s1", "pid-9"], led, pr, pending=1)
+    assert r["caller_model"] == "m-big" and r["session"]["avoided_input"] == 9500 + 900 and r["all_time"]["turns"] == 3
+    assert r["session"]["turns"] == 2 and r["session"]["measured_turns"] == 1 and r["session"]["pending_measurements"] == 1
+    assert r["prices_age_days"] is not None and r["prices_stale"] is False
     assert r["session"]["cost"]["with_carry_usd"] > r["session"]["cost"]["direct_usd"] > 0
     assert {"m-big", "m-small"} <= set(r["per_model"])
     assert sv.fmt_tokens(950) == "950" and sv.fmt_tokens(9500) == "9.5K" and sv.fmt_tokens(2_400_000) == "2.4M"
@@ -138,3 +143,37 @@ def test_ledger_backfill_is_idempotent(tmp_path):
     assert next(r for r in recs if r["turn"] == "t_3")["error"] is True
     led.append("s3", {"id": "t_9", "kind": "run", "gathered_chars": 10, "out_chars": 1})
     assert led.backfill(sessions) == 0 and len(led.records()) == 3
+
+
+def test_measured_counts_win_over_the_chars_estimate():
+    a = sv.Prices.merge({}, {"assumptions": ASSUME})["assumptions"]
+    e = sv.estimate_turn({"kind": "run", "gathered_chars": 40000, "out_chars": 2000, "gathered_tokens": 9000, "returned_tokens": 400}, a)
+    assert e["measured"] and (e["gathered_tokens"], e["returned_tokens"], e["avoided_input"], e["carried"]) == (9000, 400, 8600, 86000)
+    half = sv.estimate_turn({"kind": "run", "gathered_chars": 40000, "out_chars": 2000, "gathered_tokens": 9000, "returned_tokens": None}, a)
+    assert not half["measured"] and half["gathered_tokens"] == 10000  # one count missing -> chars for both
+    assert sv.estimate_turn({"kind": "run", "gathered_chars": 40000, "out_chars": 2000, "gathered_tokens": True, "returned_tokens": 5}, a)["measured"] is False
+    err = sv.estimate_turn({"kind": "run", "gathered_chars": 40000, "out_chars": 2000, "gathered_tokens": 9000, "returned_tokens": 400, "error": True}, a)
+    assert err["avoided_input"] == 0 and err["avoided_output"] == 0
+    agg = sv.aggregate([{"kind": "run", "gathered_chars": 400, "out_chars": 40, "gathered_tokens": 100, "returned_tokens": 10},
+                        {"kind": "run", "gathered_chars": 400, "out_chars": 40}], a)
+    assert agg["turns"] == 2 and agg["measured_turns"] == 1 and agg["avoided_input"] == 90 + 90
+
+
+def test_ledger_keeps_measured_counts_and_nulls(tmp_path):
+    led = sv.Ledger(tmp_path / "l.jsonl")
+    led.append("s", {"kind": "run", "gathered_chars": 40, "out_chars": 4, "gathered_tokens": 10, "returned_tokens": None})
+    led.append("s", {"kind": "run", "gathered_chars": 40, "out_chars": 4})
+    r1, r2 = led.records()
+    assert r1["gathered_tokens"] == 10 and r1["returned_tokens"] is None and "gathered_tokens" not in r2
+
+
+def test_price_staleness(tmp_path):
+    p = tmp_path / "prices.json"
+    p.write_text(json.dumps({"checked": "2020-01-01", "assumptions": {"stale_after_days": 30}, "models": MODELS}))
+    pr = sv.Prices(p)
+    assert pr.age_days() > 2000 and pr.stale()
+    p.write_text(json.dumps({"checked": "2020-01-01", "assumptions": {"stale_after_days": 100000}, "models": MODELS}))
+    assert not pr.stale()
+    p.write_text(json.dumps({"checked": "not a date", "models": MODELS}))
+    assert pr.age_days() is None and pr.stale()  # unreadable date reads as stale
+    assert not sv.Prices(None).stale()  # the package defaults are fresh on the day they ship

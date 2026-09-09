@@ -39,6 +39,7 @@ _DEFAULT_ASSUMPTIONS = {
     "context_reuse_calls": 8,
     "output_credit": {"run": 0.0, "delegate": 1.0, "verbatim": 0.0},
     "caller_model": "",
+    "stale_after_days": 30,
 }
 
 
@@ -93,7 +94,7 @@ class Prices:
         self.defaults = self._read(DEFAULT_PATH) or {}
         self.doc: dict = {}
         self.override_present = False
-        self._stamp: float | None = -2.0
+        self._stamp: tuple[int, int] | None | float = -2.0
         self.reload()
 
     @staticmethod
@@ -108,10 +109,11 @@ class Prices:
             return None
 
     def reload(self) -> None:
-        stamp: float | None = None
+        stamp: tuple[int, int] | None = None  # (mtime_ns, size): two quick rewrites must not look identical
         if self.override_path is not None and self.override_path.is_file():
             try:
-                stamp = self.override_path.stat().st_mtime
+                st = self.override_path.stat()
+                stamp = (st.st_mtime_ns, st.st_size)
             except OSError:
                 stamp = None
         if stamp == self._stamp and self.doc:
@@ -129,7 +131,7 @@ class Prices:
             for k, v in src.items():
                 if k == "output_credit" and isinstance(v, dict):
                     a["output_credit"].update({str(kk): _num(vv) for kk, vv in v.items()})
-                elif k in ("chars_per_token", "context_reuse_calls"):
+                elif k in ("chars_per_token", "context_reuse_calls", "stale_after_days"):
                     a[k] = _num(v, a[k])
                 elif k == "caller_model":
                     a[k] = str(v or "")
@@ -178,6 +180,19 @@ class Prices:
             if m["model_id"] == model_id:
                 return m
         return None
+
+    def age_days(self) -> int | None:
+        """Days since the effective price table was checked (None if the date is unreadable)."""
+        self.reload()
+        try:
+            checked = datetime.fromisoformat(str(self.doc.get("checked") or "")).date()
+        except ValueError:
+            return None
+        return max(0, (datetime.now().date() - checked).days)
+
+    def stale(self) -> bool:
+        age = self.age_days()
+        return age is None or age > float(self.assumptions.get("stale_after_days") or 30)
 
     def caller_model(self) -> str:
         """The headline model: env override, then the file's assumption, then the first model."""
@@ -233,33 +248,42 @@ class Prices:
 # --------------------------------------------------------------------------- estimates
 
 
+_ZERO = {"gathered_tokens": 0, "returned_tokens": 0, "avoided_input": 0, "avoided_output": 0, "carried": 0, "measured": False}
+
+
 def estimate_turn(turn: dict, assumptions: dict) -> dict:
-    """Token estimate for one turn record (chars in, tokens out)."""
+    """Token figures for one turn record: the worker's exact counts when the record
+    carries them (``gathered_tokens`` / ``returned_tokens``), else characters ÷
+    ``chars_per_token``. A turn the worker failed on saved nothing."""
     kind = str(turn.get("kind") or "")
-    if kind not in COUNTED_KINDS:
-        return {"gathered_tokens": 0, "returned_tokens": 0, "avoided_input": 0, "avoided_output": 0, "carried": 0}
+    if kind not in COUNTED_KINDS or turn.get("error"):
+        return dict(_ZERO)
     cpt = float(assumptions.get("chars_per_token") or _DEFAULT_ASSUMPTIONS["chars_per_token"])
     gathered = gathered_chars(turn)
     returned = max(0, int(turn.get("out_chars") or 0))
-    gathered_tok = round(gathered / cpt)
-    returned_tok = round(returned / cpt)
+    gt, rt = turn.get("gathered_tokens"), turn.get("returned_tokens")
+    measured = isinstance(gt, int) and isinstance(rt, int) and not isinstance(gt, bool) and not isinstance(rt, bool)
+    gathered_tok = int(gt) if measured else round(gathered / cpt)
+    returned_tok = int(rt) if measured else round(returned / cpt)
     avoided_input = max(0, gathered_tok - returned_tok) if gathered else 0
     credit_key = "verbatim" if turn.get("verbatim") else kind
     credit = float((assumptions.get("output_credit") or {}).get(credit_key, 0.0) or 0.0)
-    avoided_output = round(returned_tok * credit) if not turn.get("error") else 0
+    avoided_output = round(returned_tok * credit)
     reuse = float(assumptions.get("context_reuse_calls") or 0)
     return {"gathered_tokens": gathered_tok, "returned_tokens": returned_tok,
             "avoided_input": avoided_input, "avoided_output": avoided_output,
-            "carried": round(avoided_input * reuse)}
+            "carried": round(avoided_input * reuse), "measured": measured}
 
 
 def aggregate(turns: list[dict], assumptions: dict) -> dict:
-    tot = {"turns": 0, "gathered_tokens": 0, "returned_tokens": 0, "avoided_input": 0, "avoided_output": 0, "carried": 0}
+    tot = {"turns": 0, "measured_turns": 0, "gathered_tokens": 0, "returned_tokens": 0,
+           "avoided_input": 0, "avoided_output": 0, "carried": 0}
     for t in turns:
         if str(t.get("kind") or "") not in COUNTED_KINDS:
             continue
         e = estimate_turn(t, assumptions)
         tot["turns"] += 1
+        tot["measured_turns"] += 1 if e["measured"] else 0
         for k in ("gathered_tokens", "returned_tokens", "avoided_input", "avoided_output", "carried"):
             tot[k] += e[k]
     return tot
@@ -307,6 +331,9 @@ class Ledger:
                "session": session_key, "turn": turn.get("id"), "kind": turn.get("kind"),
                "verbatim": bool(turn.get("verbatim")), "gathered_chars": gathered_chars(turn),
                "out_chars": int(turn.get("out_chars") or 0), "error": bool(turn.get("error"))}
+        for k in ("gathered_tokens", "returned_tokens"):  # exact counts from the worker, when measured
+            if k in turn:
+                rec[k] = turn[k] if isinstance(turn[k], int) and not isinstance(turn[k], bool) else None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as f:
@@ -363,26 +390,41 @@ class Ledger:
                 added += 1
         return added
 
-    def totals(self, assumptions: dict) -> dict:
-        recs = self.records()
+    @staticmethod
+    def totals_of(recs: list[dict], assumptions: dict) -> dict:
         agg = aggregate(recs, assumptions)
         agg["sessions"] = len({r.get("session") for r in recs})
         agg["since"] = min((r.get("ts") or "" for r in recs), default="") or None
         return agg
 
+    def totals(self, assumptions: dict) -> dict:
+        return self.totals_of(self.records(), assumptions)
 
-def report(session_turns: list[dict], ledger: Ledger, prices: Prices) -> dict:
-    """The block the status tool and the admin overview show."""
+    def by_session(self) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        for r in self.records():
+            out.setdefault(str(r.get("session") or "?"), []).append(r)
+        return out
+
+
+def report(session_keys: list[str], ledger: Ledger, prices: Prices, *, pending: int = 0) -> dict:
+    """The block the status tool shows: this session (every key it has been known by),
+    all sessions, the headline model's dollars, a per-model table, the price date."""
     a = prices.assumptions
-    session = aggregate(session_turns, a)
-    all_time = ledger.totals(a)
+    recs = ledger.records()
+    keys = set(session_keys)
+    session = aggregate([r for r in recs if r.get("session") in keys], a)
+    session["pending_measurements"] = pending
+    all_time = Ledger.totals_of(recs, a)
     caller = prices.caller_model()
     per_model_session = costs(session, prices)
     per_model_all = costs(all_time, prices)
     return {
         "method": ("estimate: avoided input = gathered − returned; avoided output = returned × output_credit; "
-                   "carried = avoided input × context_reuse_calls at the cache-read rate. List prices, USD."),
+                   "carried = avoided input × context_reuse_calls at the cache-read rate. Token counts are the "
+                   "worker tokenizer's where measured, else chars ÷ chars_per_token. List prices, USD."),
         "assumptions": a, "prices_checked": prices.doc.get("checked", ""),
+        "prices_age_days": prices.age_days(), "prices_stale": prices.stale(),
         "caller_model": caller,
         "session": {**session, "cost": per_model_session.get(caller)},
         "all_time": {**all_time, "cost": per_model_all.get(caller)},
