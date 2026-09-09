@@ -123,7 +123,7 @@ output capped) and receive a digest of its output. Raw output is kept as an arti
 | `cwd` | string | server cwd | working directory |
 | `timeout_s` | int | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | kill after |
 | `max_output_chars` | int | `LOCAL_LLM_MCP_MAX_OUTPUT_CHARS` | soft digest budget |
-| `verbatim` | bool | `false` | quote the relevant output lines exactly instead of digesting |
+| `verbatim` | bool | `false` | copy the matching output lines byte for byte instead of digesting — only for text you will reproduce or edit; never for questions, counts, summaries or listings |
 
 A timeout or non-zero exit is reported inside the digest and in the trailer.
 
@@ -141,7 +141,7 @@ of a shell command.
 | `command` | string | `""` | shell command whose output is added to the material |
 | `cwd` | string | `""` | base for relative paths and the command |
 | `max_output_chars` | int | server default | soft answer budget |
-| `verbatim` | bool | `false` | quote the relevant lines exactly instead of answering in prose |
+| `verbatim` | bool | `false` | copy the matching lines byte for byte instead of answering — only for text you will reproduce or edit; never for questions, counts, summaries or listings |
 
 Without material the worker answers from the task and its session memory. In verbatim
 mode the result is one or more `source lines a-b:` blocks with numbered lines; ranges

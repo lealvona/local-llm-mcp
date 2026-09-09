@@ -514,7 +514,7 @@ def build(cfg: Config) -> FastMCP:
         cwd: Annotated[str, Field(description="Working directory for the command. Default: the server's own cwd.")] = "",
         timeout_s: Annotated[int, Field(ge=0, le=3600, description="Kill the command after this many seconds (0 = server default).")] = 0,
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the digest (0 = server default).")] = 0,
-        verbatim: Annotated[bool, Field(description="Quote the relevant output lines EXACTLY (the worker only locates them) instead of digesting. Use for code, config, or anything you must reproduce.")] = False,
+        verbatim: Annotated[bool, Field(description="Copy the matching output lines byte for byte instead of digesting (the worker only locates them). Only for text you must reproduce or edit (a function, a config block, an error with its stack). NOT for questions, counts, summaries or listings: those need the digest, which is the default.")] = False,
         ctx: Context = None,
     ) -> str:
         a = _app()
@@ -542,8 +542,9 @@ def build(cfg: Config) -> FastMCP:
             "Use for reading or summarizing files and documents, research and synthesis over provided text, "
             "calculations, format transformations, parsing, boilerplate drafting, and — in PII mode — anything that "
             "touches private data (names, addresses, credentials, personal mail; the worker reads it, you receive "
-            "placeholders such as [PERSON-1] that you can reuse in later calls). Set verbatim=true when you need the "
-            "relevant lines EXACTLY (code, config): the worker only locates them and the server quotes them. The worker "
+            "placeholders such as [PERSON-1] that you can reuse in later calls). Set verbatim=true ONLY when you will "
+            "reproduce or edit the text itself (code, config, an error with its stack): the worker locates the lines and "
+            "the server quotes them. Leave it false for anything to be answered, counted, summarised or listed. The worker "
             "also carries its own running memory of this conversation, so follow-up tasks can refer to earlier results "
             "by turn id (t_xxxxxx) or artifact ref (a_xxxxxxxx)."),
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False),
@@ -555,7 +556,7 @@ def build(cfg: Config) -> FastMCP:
         command: Annotated[str, Field(description="Shell command whose output is added to the material (bash -c; placeholders expanded server-side). Optional.")] = "",
         cwd: Annotated[str, Field(description="Base directory for relative paths and the command.")] = "",
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the answer (0 = server default).")] = 0,
-        verbatim: Annotated[bool, Field(description="Quote the relevant lines EXACTLY (the worker only locates them) instead of answering in prose.")] = False,
+        verbatim: Annotated[bool, Field(description="Copy the matching lines byte for byte instead of answering (the worker only locates them). Only for text you must reproduce or edit (a function, a config block, an error with its stack). NOT for questions, counts, summaries or listings: those need the digest, which is the default.")] = False,
         ctx: Context = None,
     ) -> str:
         a = _app()
