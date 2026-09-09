@@ -74,6 +74,21 @@ class App:
         counts = self.scrubber.register_material("\n".join(texts), self.session.vault, policy=Policy.register(entropy=False))
         return sum(counts.values())
 
+    def note_client(self, ctx: Context | None) -> None:
+        """Remember which MCP client this session belongs to (name, version, whether it can show a dialog)."""
+        try:
+            params = ctx.session.client_params if ctx is not None else None
+            info = params.clientInfo if params is not None else None
+            if info is None:
+                return
+            rec = {"name": str(info.name), "version": str(getattr(info, "version", "") or ""),
+                   "elicitation": self.client_can_ask(ctx)}
+            if self.session.meta.get("client") != rec:
+                self.session.meta["client"] = rec
+                self.session._save_meta()
+        except Exception:  # bookkeeping only
+            pass
+
     @staticmethod
     def client_can_ask(ctx: Context | None) -> bool:
         """Did the client declare the elicitation capability (it can show the user a dialog)?"""
@@ -217,6 +232,7 @@ class App:
                        max_output_chars: int, extra: dict | None = None, verbatim: bool = False,
                        ctx: Context | None = None) -> str:
         t0 = time.monotonic()
+        self.note_client(ctx)
         mode = self.mode
         extra = dict(extra or {})
         gathered_text = extra.pop("_gathered_text", None)
@@ -487,8 +503,9 @@ def build(cfg: Config) -> FastMCP:
             "worker model digest the output for you. You receive the digest plus a trailer (turn id, artifact ref, "
             "exit code, raw size); the raw output is stored as an artifact you can slice with local_llm_artifact. "
             "Use this instead of your own shell tool whenever the command would print more than you need to read "
-            "(logs, tests, builds, listings, git output, grep results). Placeholders such as [SECRET-1] in the command "
-            "are expanded server-side before execution and never appear in the result."),
+            "(logs, tests, builds, listings, git output, grep results); rule of thumb: anything over ~40 lines / 2 KB "
+            "of output belongs here, while commands that print little or nothing run directly. Placeholders such as "
+            "[SECRET-1] in the command are expanded server-side before execution and never appear in the result."),
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
     )
     async def local_llm_run(
@@ -524,7 +541,8 @@ def build(cfg: Config) -> FastMCP:
             "directories to read (paths; directories are listed), and/or the output of a shell command (command). "
             "Use for reading or summarizing files and documents, research and synthesis over provided text, "
             "calculations, format transformations, parsing, boilerplate drafting, and — in PII mode — anything that "
-            "touches private data (the worker reads it; you receive placeholders). Set verbatim=true when you need the "
+            "touches private data (names, addresses, credentials, personal mail; the worker reads it, you receive "
+            "placeholders such as [PERSON-1] that you can reuse in later calls). Set verbatim=true when you need the "
             "relevant lines EXACTLY (code, config): the worker only locates them and the server quotes them. The worker "
             "also carries its own running memory of this conversation, so follow-up tasks can refer to earlier results "
             "by turn id (t_xxxxxx) or artifact ref (a_xxxxxxxx)."),
@@ -633,7 +651,9 @@ def build(cfg: Config) -> FastMCP:
     )
     async def local_llm_status(ctx: Context = None) -> str:
         a = _app()
+        a.note_client(ctx)
         st = a.session.status()
+        st["client"] = a.session.meta.get("client") or None
         st["disclosure"] = {**a.session.disclosure.to_meta(), "escalation": cfg.escalation,
                             "open_kinds": sorted(a.policy().open), "client_can_ask": App.client_can_ask(ctx)}
         st["summary"] = a.outbound(a.session.summary()).text
@@ -683,6 +703,17 @@ def build(cfg: Config) -> FastMCP:
         a.session.append_turn({"kind": "mode", "task": f"mode {previous} -> {mode}", "result": "", "mode": mode})
         a.observer.event("session", "mode_change", {"from": previous, "to": mode, "session": a.session.key})
         return f"Mode is now {mode} (was {previous}).\n\n" + prompts.client_instructions(mode, cfg.model, cfg.base_url)
+
+    @mcp.prompt(name="local_llm_instructions",
+                description="When and how to call this server (the same text as the connection instructions; for "
+                            "clients that do not surface them).")
+    def local_llm_instructions_prompt() -> str:
+        return prompts.client_instructions(_app().mode, cfg.model, cfg.base_url)
+
+    @mcp.resource("local-llm://instructions", name="local_llm_instructions", mime_type="text/plain",
+                  description="Current mode and the rules for calling this server.")
+    def local_llm_instructions_resource() -> str:
+        return prompts.client_instructions(_app().mode, cfg.model, cfg.base_url)
 
     @mcp.tool(
         name="local_llm_disclosure",

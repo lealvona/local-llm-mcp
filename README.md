@@ -36,6 +36,7 @@ package.
 - [Session memory and compaction](#session-memory-and-compaction)
 - [Tokens saved](#tokens-saved)
 - [Install and wire into Claude Code](#install-and-wire-into-claude-code)
+- [Using it from other MCP clients](#using-it-from-other-mcp-clients)
 - [Configuration reference](#configuration-reference)
 - [Rules file](#rules-file)
 - [Private terms](#private-terms)
@@ -367,6 +368,50 @@ Verify with `claude mcp list` (should say Connected) and, in a new session, the
 
 Other MCP clients: run `local-llm-mcp` over stdio. Without the hooks, sessions are
 keyed by the parent process id and compaction is manual or automatic-by-size.
+
+## Using it from other MCP clients
+
+The server is a plain stdio MCP server; nothing in it requires Claude Code. Every client below
+was exercised against this code (protocol clients with the reference tooling, agents with a real
+model turn) — what changes from client to client is only what you lose without Claude Code's
+hooks, listed after the table.
+
+| Client | Register | Verified |
+|---|---|---|
+| **Claude Code** | `claude mcp add --scope user local-llm -- /path/to/venv/bin/local-llm-mcp` + the two hooks (see above) | full: hooks, dialog, compaction trigger |
+| **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | config accepted, `codex mcp list` shows it enabled |
+| **Hermes Agent** | in `config.yaml`: `mcp_servers:\n  local-llm:\n    command: /path/to/venv/bin/local-llm-mcp` | agent turn: Hermes called `local_llm_run` and returned the digest with the server's trailer |
+| **Kimi Code CLI** | `~/.kimi/mcp.json`: `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp", "args": []}}}` | see below |
+| **opencode** | `opencode.json(c)`: `{"mcp": {"local-llm": {"type": "local", "command": ["/path/to/venv/bin/local-llm-mcp"], "enabled": true}}}` | see below |
+| **Claude Desktop, Cursor, Windsurf and most others** | `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp"}}}` in the client's MCP config | same wire protocol as the Inspector run below |
+| **MCP Inspector** (reference client) | `npx @modelcontextprotocol/inspector --cli /path/to/venv/bin/local-llm-mcp --method tools/list` | `tools/list` and a `tools/call` of `local_llm_run` |
+| **Python SDK** | `StdioServerParameters(command="/path/to/venv/bin/local-llm-mcp")` + `ClientSession` | `tools/smoke.py` is exactly this client and drives every feature, the disclosure dialog included |
+
+Pass configuration the same way for every client: put it in the dotenv the server reads
+(`~/.config/local-llm-mcp/env`), or in the client's per-server `env`.
+
+What you lose without Claude Code's hooks, and what replaces it:
+
+- **Session identity.** Claude Code's SessionStart hook maps the conversation id onto the server;
+  elsewhere the session is keyed by the client process that spawned the server (`pid-<pid>`),
+  one per conversation, or by `LOCAL_LLM_MCP_SESSION` if the client sets it. The session records
+  which client it belongs to (`client` in `local_llm_status` and the admin sessions table).
+- **Compaction trigger.** The PreCompact hook tells the worker to compact when the caller does;
+  without it the worker still compacts itself at `LOCAL_LLM_MCP_AUTO_COMPACT_CHARS` and on
+  `local_llm_compact`.
+- **The connection instructions.** Some clients never show the model the `instructions` field of
+  `initialize`. The same text is therefore also an MCP **prompt** (`local_llm_instructions`) and a
+  **resource** (`local-llm://instructions`), and the routing rules are written into the tool
+  descriptions, which every client shows. For a harness that reads an instructions file
+  (`AGENTS.md`, a system prompt), paste the ASSIST or PII text from `local_llm_status`.
+- **The disclosure dialog** needs a client that supports MCP elicitation (Claude Code does). A
+  client without it gets the `auto` behaviour: masked, with a note telling the model to call
+  `local_llm_disclosure` when the user decides.
+
+One server process serves one conversation; that is the isolation model behind the vault. Do
+not put it behind a multi-user MCP gateway (a shared mcpo instance serving a chat UI, say): every
+user would share one placeholder map, and `local_llm_run` runs shell commands as the user that
+owns the process.
 
 ## Configuration reference
 

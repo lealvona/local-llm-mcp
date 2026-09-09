@@ -185,6 +185,16 @@ async def main() -> int:
             res = ctl(before["control_socket"], {"op": "status"})
             check(res.get("mode") == "assist", "control socket sees the new mode")
 
+            # ---- generic clients: the instructions are also a prompt and a resource; the session knows its client
+            pr = await s.list_prompts()
+            check(any(x.name == "local_llm_instructions" for x in pr.prompts), "instructions available as an MCP prompt")
+            rr = await s.read_resource("local-llm://instructions")
+            rtext = "".join(getattr(c, "text", "") for c in rr.contents)
+            check("ACTIVE MODE: ASSIST" in rtext and "local_llm_run" in rtext, "instructions available as an MCP resource")
+            st = json.loads(text(await s.call_tool("local_llm_status", {})))
+            check(isinstance(st.get("client"), dict) and st["client"].get("name") and st["client"]["elicitation"] is True,
+                  f"session records its MCP client ({(st.get('client') or {}).get('name')})")
+
             # ---- disclosure lifecycle (ASSIST): first personal data asks the user through the client
             material = "Contact: Priya Testcase <priya.testcase@example.org>, card 4111 1111 1111 1111, ref PR 77"  # gitleaks:allow
             t0 = time.monotonic()
