@@ -125,7 +125,8 @@ def test_savings_and_prices_api(server):
     assert next(m for m in p2["models"] if m["model_id"] == first)["input_per_m"] == 100
     code, d2 = call(server, "GET", "/api/savings")
     assert d2["caller_model"] == first and d2["all_time"]["carried"] == 0
-    assert d2["all_time"]["cost"]["direct_usd"] == round(10450 * 100 / 1e6 + 200 * 1 / 1e6, 4)
+    f = d2["all_time"]["cost"]["tokenizer_factor"]  # the caller model's tokenizer factor scales the priced tokens
+    assert f >= 1 and d2["all_time"]["cost"]["direct_usd"] == round(f * (10450 * 100 / 1e6 + 200 * 1 / 1e6), 4)
     code, o = call(server, "GET", "/api/overview")
     assert code == 200 and o["savings"]["caller_model"] == first and o["savings"]["with_carry_usd"] == d2["all_time"]["cost"]["with_carry_usd"]
     code, p3 = call(server, "DELETE", "/api/prices")

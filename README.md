@@ -100,6 +100,10 @@ off. Only then does anything run; the result of that first call carries the full
   (the user's standing approval for that client), or the **turn on** switch on the session's row in
   the admin app. Those two, and the dialog, are the only ways the gate is ever passed.
 - `local_llm_status` is the one tool that answers while off (it shows the gate's state).
+- The dialog is **default-safe by construction**, whatever the client does with it: the answer
+  field is required, has no default, and lists **off** first, so a client that auto-accepts a
+  form (empty, with defaults, or with its first option) yields "not answered" or "off" — never
+  "on". Only an explicit **on** or **on_pii** chosen by the user arms the server.
 
 ## The two modes and when the caller calls
 
@@ -229,6 +233,7 @@ the value.
 | private terms | the operator's own literal names, addresses, numbers — an unlabelled name has no shape | terms file (`LOCAL_LLM_MCP_PRIVATE_TERMS`) |
 | entity pass (PII mode) | whatever private values the worker itself finds in the material: names, addresses, dates of birth, credentials it recognises in context | one extra local call per delegation; only exact substrings of the material are accepted, never a label or a variable name |
 | known values | every value already in the vault, exact-matched | automatic |
+| answer pass (PII mode) | after the scrub, the worker is asked what private values the ANSWER still holds — the answer is short, so this covers it whole, unlike the material pass (first two chunks); anything found is registered and the answer re-scrubbed; the trailer says `leak-check ok`, or `leak-check FAILED` when the pass could not run | one short local call per PII-mode result |
 
 Order of operations matters:
 
@@ -237,8 +242,10 @@ Order of operations matters:
    context no rule would recognise.
 2. The worker is instructed to write placeholders itself and never quote a secret.
 3. The answer is scrubbed (rules · secret shapes · identity shapes · terms · every vault value), then
-   re-scanned; anything still detectable becomes `[REDACTED]`. A privacy boundary
-   cannot rest on a model choosing to comply, so step 2 is help, not the guarantee.
+   re-scanned; anything still detectable becomes `[REDACTED]`. In PII mode the worker is
+   then asked what private values the scrubbed answer still contains, and those are masked
+   too (the answer pass). A privacy boundary cannot rest on a model choosing to comply, so
+   step 2 is help, not the guarantee; the deterministic layers and the answer pass are.
 
 ### Disclosure — what may come back in clear
 
@@ -324,8 +331,12 @@ the worker's own tokenize endpoint (vLLM's `POST /tokenize`, or llama.cpp's) for
 of what it gathered and of what it returned, in the background, and records both in the ledger. A
 worker with no such endpoint, or a turn that outlives the process, falls back to characters ÷
 `chars_per_token`; the report says how many turns were measured. The counts are the worker
-tokenizer's, not the caller model's — a different vocabulary tokenizes the same text a little
-differently, and that residual is not corrected.
+tokenizer's, not the caller model's, so each price row may carry a **`tokenizer_factor`**: that
+model's tokens per character relative to the worker's, applied at pricing time only (the ledger
+stays in worker tokens). Seeded at 1.3 for the Claude 4.7+ tokenizer family from Anthropic's own
+note that it yields roughly 30 % more tokens, 1.0 (assumed equal) everywhere else; editable per
+row in the admin app and the override file. The status block and the admin table show which
+factor priced the headline.
 
 Dollars are **list prices** per 1M tokens for flagship models of every major provider, read
 from the providers' own pricing pages and stamped with the date they were checked
@@ -662,6 +673,7 @@ uv sync
 .venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration, verbatim helpers, admin API
 .venv/bin/python tools/smoke.py                      # end to end over stdio against your configured model
 .venv/bin/python tools/leakcheck.py ~/.secrets/app.env   # a REAL secrets file through PII mode; asserts no value leaks
+.venv/bin/python tools/piicheck.py                   # adversarial tasks over SYNTHETIC private data, PII mode + ASSIST default: nothing may come back
 python tools/publiccheck.py --all                    # every commit in the history: nothing personal, no stray identity or trailer
 ```
 

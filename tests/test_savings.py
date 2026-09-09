@@ -177,3 +177,23 @@ def test_price_staleness(tmp_path):
     p.write_text(json.dumps({"checked": "not a date", "models": MODELS}))
     assert pr.age_days() is None and pr.stale()  # unreadable date reads as stale
     assert not sv.Prices(None).stale()  # the package defaults are fresh on the day they ship
+
+
+def test_tokenizer_factor_scales_cost_per_model(tmp_path):
+    """Counts are the worker tokenizer's; a model whose tokenizer yields more tokens saves proportionally more."""
+    import json
+    p = tmp_path / "prices.json"
+    p.write_text(json.dumps({"models": [
+        {"provider": "T", "model_id": "same", "input_per_m": 10, "output_per_m": 10, "cache_read_per_m": 1},
+        {"provider": "T", "model_id": "double", "input_per_m": 10, "output_per_m": 10, "cache_read_per_m": 1, "tokenizer_factor": 2.0},
+        {"provider": "T", "model_id": "absurd", "input_per_m": 10, "output_per_m": 10, "cache_read_per_m": 1, "tokenizer_factor": 99},
+    ]}))
+    pr = sv.Prices(p, caller_model="double")
+    agg = {"avoided_input": 1_000_000, "avoided_output": 0, "carried": 1_000_000}
+    c = sv.costs(agg, pr)
+    assert c["same"]["tokenizer_factor"] == 1.0 and c["same"]["direct_usd"] == 10 and c["same"]["carried_usd"] == 1
+    assert c["double"]["tokenizer_factor"] == 2.0 and c["double"]["direct_usd"] == 20 and c["double"]["carried_usd"] == 2
+    assert c["double"]["model_tokens"]["avoided_input"] == 2_000_000
+    assert c["absurd"]["tokenizer_factor"] == 1.0  # out of range → ignored, not trusted
+    assert next(m for m in sv.Prices(None).models if m["model_id"] == "claude-opus-5")["tokenizer_factor"] == 1.3
+    assert next(m for m in sv.Prices(None).models if m["model_id"] == "claude-haiku-4-5")["tokenizer_factor"] == 1.0

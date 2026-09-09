@@ -8,12 +8,16 @@ without asking again. A client that cannot show a dialog gets a refusal that say
 can enable the server explicitly (``LOCAL_LLM_MCP_ARM=on`` in that client's server config, or
 the admin app's session row). ``LOCAL_LLM_MCP_ARM=on`` is the user's standing approval for one
 client configuration and is the only way the gate is ever passed without a dialog.
+
+Architectural guarantee, independent of the client: the dialog's answer field is required, has no
+default, and lists "off" first — so a client that auto-accepts a form (empty, defaults, or first
+option) yields "not answered" or "off", never "on". Only an explicit "on"/"on_pii" arms the server.
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-ARM_CHOICES = ("on", "on_pii", "off")
+ARM_CHOICES = ("off", "on", "on_pii")  # "off" FIRST: a client that auto-fills a form with its first option can never turn the server on
 ARM_TEXT = {
     "on": "Turn it on for this session (current mode)",
     "on_pii": "Turn it on in PII mode: every private value comes back as a placeholder",
@@ -34,7 +38,7 @@ def arm_message(mode: str, model: str, trigger: str) -> str:
         f"If you turn it on, a worker model on your own network ({model}) will run commands, read files and work "
         f"over material on the model's behalf and return sanitized digests; the material stays on this machine. "
         f"Current mode: {mode.upper()} ({'everything private masked' if mode == 'pii' else 'secrets and account/id numbers masked; names shown only if you allow it'}).\n"
-        f"• on — {ARM_TEXT['on']}\n• on_pii — {ARM_TEXT['on_pii']}\n• off — {ARM_TEXT['off']}\n"
+        f"• off — {ARM_TEXT['off']}\n• on — {ARM_TEXT['on']}\n• on_pii — {ARM_TEXT['on_pii']}\n"
         "Cancel keeps it off for now; the model may ask again later in this session."
     )
 

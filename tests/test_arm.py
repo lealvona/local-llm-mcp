@@ -100,4 +100,17 @@ def test_bad_arm_value_is_refused(monkeypatch, tmp_path):
 def test_dialog_text_names_tool_not_arguments():
     m = arm_message("assist", "worker-x", "local_llm_run")
     assert "local_llm_run" in m and "worker-x" in m and "ls" not in m
-    assert set(EnableChoice.model_json_schema()["properties"]["choice"]["enum"]) == {"on", "on_pii", "off"}
+    assert EnableChoice.model_json_schema()["properties"]["choice"]["enum"] == ["off", "on", "on_pii"]  # off FIRST
+    assert "choice" in EnableChoice.model_json_schema()["required"] and "default" not in EnableChoice.model_json_schema()["properties"]["choice"]
+
+
+def test_auto_answered_dialogs_can_never_arm(monkeypatch, tmp_path):
+    """A client that auto-accepts the form — empty, or with its first option — must not turn the server on."""
+    app = make_app(monkeypatch, tmp_path)
+    on, text = gate(app, FakeCtx(can_ask=True, action="accept", choice=""))       # accepted, nothing chosen
+    assert not on and "did not answer" in text and app.session.armed_state() is None
+    on, text = gate(app, FakeCtx(can_ask=True, action="accept", choice="yes"))    # accepted, not a listed choice
+    assert not on and "did not answer" in text and app.session.armed_state() is None
+    first = EnableChoice.model_json_schema()["properties"]["choice"]["enum"][0]
+    on, text = gate(app, FakeCtx(can_ask=True, action="accept", choice=first))    # accepted with the FIRST option
+    assert not on and text == OFF_TEXT and app.session.armed_state() == "off"

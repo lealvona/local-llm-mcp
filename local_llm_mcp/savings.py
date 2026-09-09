@@ -159,6 +159,10 @@ class Prices:
                 "context_note": str(m.get("context_note") or ""), "source_url": str(m.get("source_url") or ""),
                 "checked": str(m.get("checked") or base.get("checked") or ""),
                 "confidence": str(m.get("confidence") or ""),
+                # this model's tokenizer relative to the worker's (counts are the worker tokenizer's; a model whose
+                # tokenizer yields more tokens per character saves proportionally more). 1.0 = assume equal.
+                "tokenizer_factor": _factor(m.get("tokenizer_factor")),
+                "tokenizer_note": str(m.get("tokenizer_note") or ""),
             })
         return {"schema": 1, "checked": str(over.get("checked") or base.get("checked") or ""),
                 "assumptions": a, "models": out_models}
@@ -217,7 +221,7 @@ class Prices:
                 rec["enabled"] = False
                 models.append(rec)
                 continue
-            for k in ("provider", "display_name", "context_note", "source_url", "checked", "confidence"):
+            for k in ("provider", "display_name", "context_note", "source_url", "checked", "confidence", "tokenizer_note"):
                 if m.get(k) not in (None, ""):
                     rec[k] = str(m[k])
             for k in ("input_per_m", "output_per_m"):
@@ -226,6 +230,8 @@ class Prices:
             for k in ("cache_read_per_m", "cache_write_per_m"):
                 if k in m:
                     rec[k] = None if m.get(k) in (None, "") else _num(m.get(k))
+            if m.get("tokenizer_factor") not in (None, ""):
+                rec["tokenizer_factor"] = _factor(m.get("tokenizer_factor"))
             models.append(rec)
         out = {"schema": 1, "checked": str(doc.get("checked") or datetime.now().date().isoformat()),
                "note": "Override for local-llm-mcp price estimates; edited by the admin app or by hand. "
@@ -289,13 +295,24 @@ def aggregate(turns: list[dict], assumptions: dict) -> dict:
     return tot
 
 
+def _factor(v) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return f if 0.1 <= f <= 10 else 1.0
+
+
 def cost(agg: dict, model: dict) -> dict:
-    """USD saved for one aggregate at one model's list prices."""
-    inp, out = agg["avoided_input"], agg["avoided_output"]
+    """USD saved for one aggregate at one model's list prices. Token counts are the worker tokenizer's;
+    the model's ``tokenizer_factor`` converts them to that model's own token count first."""
+    f = _factor(model.get("tokenizer_factor", 1.0))
+    inp, out = agg["avoided_input"] * f, agg["avoided_output"] * f
     direct = inp * model["input_per_m"] / 1e6 + out * model["output_per_m"] / 1e6
     carry_rate = model["cache_read_per_m"] if model.get("cache_read_per_m") is not None else model["input_per_m"]
-    carried = agg["carried"] * carry_rate / 1e6
-    return {"direct_usd": round(direct, 4), "carried_usd": round(carried, 4), "with_carry_usd": round(direct + carried, 4)}
+    carried = agg["carried"] * f * carry_rate / 1e6
+    return {"direct_usd": round(direct, 4), "carried_usd": round(carried, 4), "with_carry_usd": round(direct + carried, 4),
+            "tokenizer_factor": f, "model_tokens": {"avoided_input": round(inp), "avoided_output": round(out), "carried": round(agg["carried"] * f)}}
 
 
 def costs(agg: dict, prices: Prices) -> dict[str, dict]:
@@ -430,6 +447,7 @@ def report(session_keys: list[str], ledger: Ledger, prices: Prices, *, pending: 
         "all_time": {**all_time, "cost": per_model_all.get(caller)},
         "per_model": {mid: {"session_usd": per_model_session[mid]["with_carry_usd"],
                             "all_time_usd": per_model_all[mid]["with_carry_usd"],
-                            "all_time_direct_usd": per_model_all[mid]["direct_usd"]}
+                            "all_time_direct_usd": per_model_all[mid]["direct_usd"],
+                            "tokenizer_factor": per_model_all[mid]["tokenizer_factor"]}
                       for mid in per_model_all},
     }

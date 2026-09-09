@@ -269,7 +269,8 @@ async def main() -> int:
           and "OFF" in again, "user says off: refused, nothing ran, remembered, not asked again")
     out, st2, again = await gate_case("smoke-gate-nodialog", None)
     check("cannot show the user a dialog" in out and "LOCAL_LLM_MCP_ARM=on" in out and st2["turns_total"] == 0
-          and st2["armed"].get("state") is None, "client without elicitation: refused with the way to enable, nothing ran")
+          and st2["armed"]["state"] == "off" and st2["armed"].get("source") is None and "asked" not in st2["armed"],
+          "client without elicitation: refused with the way to enable, nothing ran, no dialog recorded")
 
     import json as _json, pathlib as _pl  # the server flushes its token measurements at shutdown; read the ledger after
     ledger = _pl.Path(str(state)) / "savings.jsonl"

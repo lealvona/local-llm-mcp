@@ -30,7 +30,7 @@ from .control import socket_path, start as start_control
 from .llm import LLMError, LocalLLM
 from .material import cap, read_paths, run_command
 from .observers import load_observer
-from .scrub import Policy, ScrubResult, Scrubber
+from .scrub import TIERS, Policy, ScrubResult, Scrubber
 from .session import Session
 from . import verbatim as vb
 
@@ -351,6 +351,14 @@ class App:
                                                          "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
                                                          **{k: v for k, v in extra.items() if k in ("rc", "timed_out", "truncated")}}) if material else ""
             scrubbed = self.outbound(answer, policy) if answer else ScrubResult("", 0, {})
+            # The answer pass runs whenever identity is MASKED by the effective policy — PII mode, and ASSIST
+            # until the user opens identity — so an unlabelled bare name the worker echoes cannot slip past the
+            # shape layers. None = not applicable (identity open), True = ran, False = could not run.
+            leak_checked = None
+            if scrubbed.text and not (policy.open & set(TIERS["identity"])):
+                found, leak_checked = await self.answer_pass(scrubbed.text)
+                if found:
+                    scrubbed = self.outbound(scrubbed.text, policy)
             # What the worker SAW is part of its memory too, not only what it said —
             # bounded, and scrubbed like everything else that is written down.
             excerpt = self.outbound(material[:self.cfg.excerpt_chars], policy).text if material else ""
@@ -378,7 +386,7 @@ class App:
             })
             if error:
                 trailer = self._trailer([mode, f"turn {tid}", f"ref {ref}" if ref else "", f"{secs}s"])
-                return f"Error: {error}{trailer}"
+                return f"Error: {self.outbound(error).text}{trailer}"  # a worker's error body may echo input
             trailer = self._trailer([
                 mode, f"turn {tid}", f"ref {ref}" if ref else "",
                 f"rc {extra['rc']}" if "rc" in extra else "",
@@ -388,11 +396,26 @@ class App:
                 ("verbatim" + (f" · not shown: lines {', '.join(f'{a}-{b}' for a, b in left_out)} (fetch with local_llm_artifact line_start/line_end)" if left_out else "")) if verbatim else "",
                 "verbatim: no lines matched, digested instead" if fallback else "",
                 self.llm.last_model, f"{secs}s", f"saved ≈ {sv.fmt_tokens(saved)} tok" if saved else "",
-                f"disclosure: {decision}" if decision else "", scrubbed.trailer(),
+                f"disclosure: {decision}" if decision else "",
+                "" if leak_checked is None else ("leak-check ok" if leak_checked else "leak-check FAILED (deterministic layers only)"),
+                scrubbed.trailer(),
             ])
             result = scrubbed.text + (("\n\n" + notice) if notice else "") + trailer
         self.maybe_autocompact()
         return result
+
+    async def answer_pass(self, answer: str) -> tuple[int, bool]:
+        """PII mode's last line: ask the worker what private values the ANSWER still holds (it is
+        short, so this covers it whole — unlike the material pass, bounded to two chunks), register
+        them, and let the caller re-scrub. Returns (values registered, pass ran)."""
+        try:
+            text, _u = await self.llm.chat(prompts.ENTITY_SYSTEM, prompts.ENTITY_USER.format(material=answer),
+                                           max_tokens=1024, temperature=0.0)
+            found = prompts.parse_entities(text)
+            return self.scrubber.register_entities(found, answer, self.session.vault), True
+        except Exception as exc:
+            log.warning("answer leak-check failed: %s", exc)
+            return 0, False
 
     async def entity_pass(self, material: str) -> int:
         """Ask the worker what private values the material holds; register them.
@@ -443,6 +466,12 @@ class App:
                 self.observer.event("session", "compaction_failed", {"error": str(exc)[:200], "session": self.session.key})
                 return {"ok": False, "error": str(exc)}
             scrubbed = self.outbound(summary)
+            if scrubbed.text and not (self.policy().open & set(TIERS["identity"])):
+                # the summary is the worker's prose: while identity is masked, ask it what private values the
+                # summary still names and mask those too — the same answer pass every result gets
+                found, _ran = await self.answer_pass(scrubbed.text)
+                if found:
+                    scrubbed = self.outbound(scrubbed.text)
             self.session.write_summary(scrubbed.text)
             secs = round(time.monotonic() - t0, 2)
             self.session.meta["compactions"] = int(self.session.meta.get("compactions", 0)) + 1
@@ -729,8 +758,12 @@ def build(cfg: Config) -> FastMCP:
         st = a.session.status()
         st["client"] = a.session.meta.get("client") or None
         a.session.reload_meta_if_changed()
-        st["armed"] = {**(a.session.meta.get("armed") if isinstance(a.session.meta.get("armed"), dict) else {}),
-                       "policy": cfg.arm, "client_can_ask": App.client_can_ask(ctx)}
+        armed_rec = a.session.meta.get("armed") if isinstance(a.session.meta.get("armed"), dict) else {}
+        st["armed"] = {**armed_rec, "state": ("on" if cfg.arm == "on" else armed_rec.get("state") or "off"),
+                       "policy": cfg.arm, "client_can_ask": App.client_can_ask(ctx),
+                       "note": ("standing approval LOCAL_LLM_MCP_ARM=on" if cfg.arm == "on" else
+                                {"on": "turned on for this session", "off": "off for this session"}.get(armed_rec.get("state"),
+                                 "off — nothing runs until the user turns it on (dialog, LOCAL_LLM_MCP_ARM=on, or the admin app)"))}
         st["disclosure"] = {**a.session.disclosure.to_meta(), "escalation": cfg.escalation,
                             "open_kinds": sorted(a.policy().open), "client_can_ask": App.client_can_ask(ctx)}
         st["summary"] = a.outbound(a.session.summary()).text
