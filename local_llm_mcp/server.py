@@ -192,6 +192,7 @@ class App:
                 "model": self.llm.last_model, "error": bool(error), **extra,
             }
             tid = self.session.append_turn(turn)
+            turn["id"] = tid  # append_turn writes a copy; the ledger row must carry the same id (backfill dedupes on it)
             est = sv.estimate_turn(turn, self.prices.assumptions)
             saved = est["avoided_input"] + est["avoided_output"]
             self._measure(turn, gathered_text, scrubbed.text)

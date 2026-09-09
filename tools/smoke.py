@@ -174,6 +174,13 @@ async def main() -> int:
             res = ctl(before["control_socket"], {"op": "status"})
             check(res.get("mode") == "assist", "control socket sees the new mode")
 
+    import json as _json, pathlib as _pl  # the server flushes its token measurements at shutdown; read the ledger after
+    ledger = _pl.Path(str(state)) / "savings.jsonl"
+    rows = [_json.loads(l) for l in ledger.read_text().splitlines() if l.strip()] if ledger.is_file() else []
+    check(len(rows) >= 5 and all(str(r.get("turn") or "").startswith("t_") for r in rows),
+          f"savings ledger has one row per counted turn, each with its turn id ({len(rows)} rows)")
+    check(any(isinstance(r.get("gathered_tokens"), int) and r["gathered_tokens"] > 0 for r in rows),
+          "worker-measured token counts reached the ledger")
     print(f"\n{'ALL PASS' if not failures else f'{failures} FAILURE(S)'} in {time.monotonic()-t_all:.1f}s; state={state}")
     return 1 if failures else 0
 
