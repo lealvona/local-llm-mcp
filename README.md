@@ -37,6 +37,7 @@ package.
 - [Rules file](#rules-file)
 - [Private terms](#private-terms)
 - [Observers](#observers)
+- [Admin app](#admin-app)
 - [Keeping a deployment separate from the code](#keeping-a-deployment-separate-from-the-code)
 - [State on disk](#state-on-disk)
 - [Testing and verification](#testing-and-verification)
@@ -313,6 +314,8 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_OBSERVER_URL` | unset | webhook target (also available to your own observer) |
 | `LOCAL_LLM_MCP_OBSERVER_PATH` | unset | directory added to `sys.path` to import your observer |
 | `LOCAL_LLM_MCP_SESSION` | unset | force a session key (tests, scripts) |
+| `LOCAL_LLM_MCP_ADMIN_BIND` / `_ADMIN_PORT` | `127.0.0.1` / `8631` | admin app listener |
+| `LOCAL_LLM_MCP_ADMIN_TOKEN` / `_ADMIN_TOKEN_FILE` | unset | bearer token the admin API requires (set it whenever the bind is not loopback) |
 | `LOCAL_LLM_MCP_LOG_LEVEL` | `INFO` | stderr logging |
 
 CLI: `local-llm-mcp [--mode pii|assist] [--session KEY] [--check]`.
@@ -392,6 +395,32 @@ class MyObserver(Observer):
 
 A broken or unreachable observer never fails a tool call; the server logs and continues.
 
+## Admin app
+
+`local-llm-mcp-admin` serves a small single-page app plus a JSON API for the PII layer —
+the parts the caller never sees:
+
+| Tab | What it shows (glance) | What it does (delve) |
+|---|---|---|
+| Overview | counts: terms by kind, sessions and how many are live, placeholders by kind, rules source, entity pass | each tile opens its tab |
+| Terms | the private terms by kind, values masked (hover or *reveal values*) | add a term; remove one; **harvest** candidates from pasted text with the local model and tick the ones to keep |
+| Sessions | one row per conversation: live dot, mode, last seen, turns, compactions, placeholder counts, artifacts, size | open a row: the placeholder vault (placeholder → kind → value), compacted memory, recent turns, artifacts; purge placeholders, delete artifacts, delete the session — refused while a server holds it |
+| Scrub tester | paste text, pick a mode | the text as it would leave the server, every detected span highlighted by kind, and the placeholders that would be minted |
+| Rules · Config | the shape rules in force and their source; the effective configuration (key shown as set/unset) | read-only |
+
+```bash
+local-llm-mcp-admin                 # http://127.0.0.1:8631/  (loopback, no token)
+LOCAL_LLM_MCP_ADMIN_BIND=0.0.0.0 LOCAL_LLM_MCP_ADMIN_PORT=8631 \
+LOCAL_LLM_MCP_ADMIN_TOKEN_FILE=~/.config/local-llm-mcp/admin.token local-llm-mcp-admin
+```
+
+It reads the same dotenv, state directory and terms file as the server (terms are
+hot-reloaded, so an edit here applies to running servers at once). **It shows private
+values to whoever reaches the port**: it binds to loopback by default, and when bound
+wider it should sit behind a firewall *and* a token (`LOCAL_LLM_MCP_ADMIN_TOKEN` or
+`_TOKEN_FILE`; the page asks once per tab). No external assets; `?demo=1` renders the
+page with sample data and no server, for a look at the UI.
+
 ## Keeping a deployment separate from the code
 
 This package carries nothing about any network. A deployment is:
@@ -438,7 +467,7 @@ Sessions are never deleted automatically; `rm -r` a session directory to forget 
 
 ```bash
 uv sync
-.venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration, verbatim helpers
+.venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration, verbatim helpers, admin API
 .venv/bin/python tools/smoke.py                      # end to end over stdio against your configured model
 .venv/bin/python tools/leakcheck.py ~/.secrets/app.env   # a REAL secrets file through PII mode; asserts no value leaks
 ```
