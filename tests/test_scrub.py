@@ -173,3 +173,61 @@ def test_env_file_seeds_without_overriding(tmp_path, monkeypatch):
 def test_assignment_value_that_is_a_variable_name_is_a_label(scrubber, vault):
     assert scrubber.scrub("SECRET: TELEGRAM_BOT_TOKEN\nCONFIG: OPENAI_BASE_URL", vault, secrets_only=True).replaced == 0
     assert scrubber.scrub("password: HUNTER2X", vault, secrets_only=True).replaced == 1  # gitleaks:allow
+
+
+# ---------------------------------------------------------------- identity shapes (PII mode)
+
+
+def test_identity_shapes_addresses(scrubber, vault):
+    text = ("Ship to 1234 N Maple Street, Apt 4B, Springfield, IL 62704 and P.O. Box 889, Boston, MA 02134; "
+            "office at 10 Downing Street. Meet in Portland, OR 97201.")
+    r = scrubber.scrub(text, vault)
+    for v in ("1234 N Maple Street, Apt 4B, Springfield, IL 62704", "P.O. Box 889, Boston, MA 02134",
+              "10 Downing Street", "Portland, OR 97201"):
+        assert v not in r.text, v
+    assert r.kinds == {"ADDRESS": 4}
+    assert "[ADDRESS-1]" in r.text and "[ADDRESS-4]" in r.text
+
+
+def test_identity_shapes_names(scrubber, vault):
+    text = ("Dr Ada Lovelace-Byron called. patient: Grace Hopper today.\n"
+            "From: Alan M. Turing <alan@example.org>\nDear Hedy,\nthanks for the note.\nRegards,\nLinus Torvalds\n"
+            '{"name": "Margaret Hamilton"}\nfirst name: Ken')
+    r = scrubber.scrub(text, vault)
+    for v in ("Ada Lovelace-Byron", "Grace Hopper", "Alan M. Turing", "Hedy", "Linus Torvalds", "Margaret Hamilton", "Ken"):
+        assert v not in r.text, v
+    assert r.kinds["PERSON"] == 7 and r.kinds["EMAIL"] == 1
+    assert "Dr [PERSON-1] called" in r.text and "Regards,\n[PERSON-" in r.text and '"name": "[PERSON-' in r.text
+
+
+def test_identity_shapes_dob_and_ids(scrubber, vault):
+    text = ("DOB: 03/14/1988; born on 14 March 1988; passport no. X1234567; NHS number: 4857773456; "
+            "account number: 00012345678; SSN 123 45 6789; driver's license: D1234567")
+    r = scrubber.scrub(text, vault)
+    for v in ("03/14/1988", "14 March 1988", "X1234567", "4857773456", "00012345678", "123 45 6789", "D1234567"):
+        assert v not in r.text, v
+    assert r.kinds == {"DOB": 2, "ID": 3, "ACCOUNT": 1, "SSN": 1}
+    assert "passport no. [ID-1]" in r.text and "DOB: [DOB-1]" in r.text
+
+
+def test_identity_shapes_address_beats_honorific(scrubber, vault):
+    r = scrubber.scrub("sent to 12 Sample Dr Springfield IL 62704 yesterday", vault)
+    assert r.kinds == {"ADDRESS": 1}
+    assert r.text == "sent to [ADDRESS-1] yesterday"
+
+
+def test_identity_shapes_leave_technical_text_alone(scrubber, vault):
+    text = ("PR 12345 merged; graphics card: RTX 5090; license: GPL-3.0; Hi there, hello world\n"
+            "hostname: Ms-Alpha; name: local-llm-mcp; version 3 of the way forward; Mr-Beta is a host\n"
+            "swift: 5.9; policy: ALLOW; Best\npractices apply; Dear Sir, Hello World!")
+    r = scrubber.scrub(text, vault)
+    assert r.replaced == 0, r
+
+
+def test_identity_shapes_pii_mode_only_and_switchable(terms, vault):
+    text = "Dr Ada Lovelace lives at 12 Sample Drive, Springfield, IL 62704"
+    on = Scrubber(None, terms)
+    assert on.scrub(text, vault, secrets_only=True).text == text        # ASSIST mode: untouched
+    assert on.scrub(text, vault).kinds == {"PERSON": 1, "ADDRESS": 1}   # PII mode
+    off = Scrubber(None, terms, shapes=False)
+    assert off.scrub(text, Vault(vault.path.parent / "v2.json")).replaced == 0

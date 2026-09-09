@@ -10,8 +10,12 @@ Detection is layered, and every layer is deterministic:
 * **secret shapes** — PEM blocks, JWTs, bearer headers, well-known token prefixes,
   ``KEY=value`` lines, ``password: …`` assignments, and (PII mode only) any long
   high-entropy run;
+* **identity shapes** (PII mode only) — things that identify a person by their
+  SHAPE alone, with no seed data: street addresses and PO boxes, ``City, ST 12345``,
+  names introduced by an honorific, a form label, a mail header, a greeting or a
+  sign-off, dates of birth, labelled account and identity numbers;
 * **private terms** — the operator's own literal names, addresses and numbers
-  from a terms file, because no regex knows a person's name;
+  from a terms file, because an unlabelled name has no shape;
 * **entities the worker found** — in PII mode the worker model is asked what
   private values the material holds; those are registered too (server side, and
   only if they are exact substrings of the material).
@@ -35,7 +39,7 @@ from typing import Iterable
 log = logging.getLogger("local_llm_mcp.scrub")
 
 PLACEHOLDER_RE = re.compile(r"\[(?P<kind>[A-Z]+)-(?P<n>\d+)\]")
-KINDS = ("PERSON", "ADDRESS", "PHONE", "EMAIL", "SSN", "CARD", "ACCOUNT", "SECRET", "PII")
+KINDS = ("PERSON", "ADDRESS", "PHONE", "EMAIL", "SSN", "CARD", "ACCOUNT", "DOB", "ID", "SECRET", "PII")
 
 _KIND_BY_RULE = {
     "email": "EMAIL",
@@ -76,6 +80,156 @@ _BUILTIN: list[tuple[str, re.Pattern[str], str, int]] = [
 # ids their exactness in PII mode, which is the fail-safe direction there; it is
 # NOT applied in ASSIST mode, where secrets_only scrubbing keeps SHAs intact.
 _ENTROPY_RE = re.compile(r"(?<![A-Za-z0-9_/.:\-])[A-Za-z0-9_]{32,}(?![A-Za-z0-9_/.:\-])")
+
+
+# --------------------------------------------------------------------------- identity shapes
+# PII mode only. Things that identify a person by their SHAPE, with no seed data:
+# street addresses and PO boxes, "City, ST 12345", names introduced by an
+# honorific, a form label, a mail header, a greeting or a sign-off, dates of
+# birth, and labelled account / identity numbers. Every pattern is bounded (no
+# nested unbounded repeats) so the layer stays linear in the text — measured at
+# ~10-15 ms per 100 KB against ~50 ms per 100 KB for the layers above it
+# (tools/bench_shapes.py). An UNLABELLED name has
+# no shape; those come from the terms file and the entity pass. Over-matching
+# here (a product called "Mr Cabinet", a JSON "name": "Some Thing") costs a
+# placeholder, never a leak, which is the fail-safe direction for PII mode.
+# Off with LOCAL_LLM_MCP_SHAPES=0.
+
+_NAME_WORD = r"[A-Z][a-z'’]{1,24}(?:-[A-Za-z][a-z'’]{1,24})?"
+_NAME1 = rf"{_NAME_WORD}(?:\s+(?:[A-Z]\.\s+)?{_NAME_WORD}){{0,2}}"  # 1-3 words
+_NAME2 = rf"{_NAME_WORD}(?:\s+(?:[A-Z]\.\s+)?{_NAME_WORD}){{1,3}}"  # 2-4 words
+_STREET_SUFFIX = (
+    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Place|Pl|"
+    r"Terrace|Ter|Way|Parkway|Pkwy|Highway|Hwy|Route|Rte|Trail|Trl|Square|Sq|Loop|Crescent|Cres|Close|"
+    r"Gardens|Gdns|Grove|Row|Alley|Plaza|Path|Walk|Broadway|Turnpike|Tpke|Expressway|Expy)"
+)
+_POSTAL = r"(?:[A-Z]{2}\s+\d{5}(?:-\d{4})?|[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2})"  # US zip · UK postcode
+_LOCALITY = rf"(?:,?\s+{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,3}},?\s+{_POSTAL}\b)?"
+_UNIT = r"(?:,?\s*(?:Apt|Apartment|Suite|Ste|Unit|Floor|Fl|Bldg|Building|Room|Rm|#)\.?\s*[A-Za-z0-9-]{1,8})?"
+# "no. 123" · "#123" · "number 123" · ": 123" · '": "123'
+_LABEL_SEP = r"(?:\s*(?i:#|no\.?|number|num\.?)\s*[:=]?|\"?\s*[:=])\s*\"?"
+_MONTH = (r"(?i:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+          r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+_DATE = (r"(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}"
+         rf"|\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\.?,?\s+\d{{4}}|{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}})")
+_NOT_A_GREETING = (r"(?!(?:Sir|Madam|Team|All|Everyone|Everybody|Customer|Friend|Friends|Colleagues|Support|Sirs|"
+                   r"There|Both|Folks|User|Users|Admin|Guest|Guests|World)\b)")
+_ID_VALUE = r"([A-Z0-9][A-Z0-9 -]{3,30}[A-Z0-9])\b"
+
+# (name, pattern, kind, value group, value must contain a digit, triggers, anchored)
+# The case-insensitive label alternations are what cost time, so a labelled
+# pattern is not scanned over the text: its triggers (lowercase substrings found
+# with str.find on an ASCII-lowercased copy, or one cheap literal-led regex)
+# locate candidates, and the pattern is then MATCHED at each hit (anchored —
+# every alternative starts with one of its triggers) or searched in a short
+# window around it (a label that starts before its trigger, a line-anchored
+# pattern, a tail that ends the match). No triggers = scanned whole.
+_Trigger = str | re.Pattern[str]
+_IDENTITY: list[tuple[str, re.Pattern[str], str, int, bool, tuple[_Trigger, ...], bool]] = [
+    ("street_address", re.compile(
+        r"\b\d{1,6}[A-Za-z]?\s+(?:(?:[NSEW]|NE|NW|SE|SW|North|South|East|West)\.?\s+)?"
+        r"(?:(?:[A-Z][A-Za-z'’.-]{1,24}|\d{1,3}(?:st|nd|rd|th))\s+){1,4}" + _STREET_SUFFIX + r"\b\.?"
+        + _UNIT + _LOCALITY), "ADDRESS", 0, False, (), False),
+    ("po_box", re.compile(r"\b(?i:p\.?\s?o\.?\s*box|post\s+office\s+box)\s+\d{1,8}\b" + _LOCALITY),
+     "ADDRESS", 0, False, ("box",), False),
+    ("city_state_zip", re.compile(
+        rf"\b{_NAME_WORD}(?:\s+{_NAME_WORD}){{0,3}},\s*[A-Z]{{2}}\s+\d{{5}}(?:-\d{{4}})?\b"), "ADDRESS", 0, False,
+     (re.compile(r",[ \t]*[A-Z]{2}[ \t]+\d{5}"),), False),
+    ("honorific_name", re.compile(
+        rf"\b(?:Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Professor|Sir|Dame|Rev|Sgt|Capt|Lt)\.?\s+({_NAME1})\b"), "PERSON", 1, False,
+     ("mr", "ms", "miss", "mx", "dr", "prof", "sir", "dame", "rev", "sgt", "capt", "lt"), True),
+    ("labelled_name", re.compile(
+        r"(?i:\b(?:name|full\s+name|contact(?:\s+(?:name|person))?|customer|patient|client|tenant|guest|resident|"
+        r"applicant|employee|student|bride|groom|spouse|partner|parent|guardian|owner|account\s+holder|"
+        r"beneficiary|sender|recipient|passenger|driver|attn|attention)\b)\"?\s*[:=]\s*\"?(" + _NAME2 + r")\b"),
+     "PERSON", 1, False,
+     ("name", "full", "contact", "customer", "patient", "client", "tenant", "guest", "resident", "applicant",
+      "employee", "student", "bride", "groom", "spouse", "partner", "parent", "guardian", "owner", "account",
+      "beneficiary", "sender", "recipient", "passenger", "driver", "attn", "attention"), True),
+    ("labelled_name_part", re.compile(
+        r"(?i:\b(?:first|last|given|family|middle|maiden)\s+name|\bsurname|\bforename|\bnickname)\b\"?\s*[:=]\s*\"?("
+        + _NAME1 + r")\b"), "PERSON", 1, False,
+     ("first", "last", "given", "family", "middle", "maiden", "surname", "forename", "nickname"), True),
+    ("mail_header_name", re.compile(
+        rf"(?m)^[ \t]*(?i:From|To|Cc|Bcc|Reply-To)\s*:\s*\"?({_NAME2})\"?\s*(?=<|,|$)"), "PERSON", 1, False, (), False),
+    ("greeting_name", re.compile(
+        rf"(?m)\b(?:Dear|Hi|Hello|Hey|Good\s+(?:morning|afternoon|evening))[ ,]+{_NOT_A_GREETING}({_NAME1})"
+        r"(?=\s*[,!.:;—–-]|\s*$)"), "PERSON", 1, False, ("dear", "hi", "hello", "hey", "good"), True),
+    ("signoff_name", re.compile(
+        r"(?m)^[ \t]*(?i:(?:best|kind|warm)\s+regards|regards|warmly|sincerely(?:\s+yours)?|best|all\s+the\s+best|cheers|"
+        r"thanks|thank\s+you|many\s+thanks|yours(?:\s+(?:truly|sincerely|faithfully))?|love|take\s+care),?[ \t]*"
+        rf"(?:\r?\n[ \t]*){{1,2}}({_NAME1})[ \t]*$"), "PERSON", 1, False,
+     ("regards", "warmly", "sincerely", "best", "cheers", "thank", "yours", "love", "take care"), False),
+    ("date_of_birth", re.compile(
+        rf"(?i:\b(?:dob|d\.o\.b\.?|date\s+of\s+birth|birth\s*date|birthday|born(?:\s+on)?)\b)\"?\s*[:=]?\s*\"?({_DATE})"),
+     "DOB", 1, False, ("dob", "d.o.b", "date of birth", "birth", "born"), True),
+    ("labelled_ssn", re.compile(
+        r"(?i:\bssn|\bsocial\s+security(?:\s+(?:no\.?|number|#))?)\"?\s*[:=]?\s*\"?(\d{3}[ -]?\d{2}[ -]?\d{4})\b"),
+     "SSN", 1, True, ("ssn", "social security"), True),
+    ("labelled_account", re.compile(
+        r"(?i:\b(?:account|acct|routing|swift|iban|sort\s+code|(?:credit|debit|bank|payment)\s+card))\b" + _LABEL_SEP
+        + _ID_VALUE), "ACCOUNT", 1, True,
+     ("account", "acct", "routing", "swift", "iban", "sort code", "credit", "debit", "bank", "payment"), True),
+    ("labelled_id", re.compile(
+        r"(?i:\b(?:passport|driver'?s?\s+licen[cs]e|driving\s+licen[cs]e|national\s+id|national\s+insurance|"
+        r"ni\s+(?:no\.?|number)|nhs|medicare|medicaid|tax\s+id|taxpayer\s+id|itin|member\s+id|policy|claim|"
+        r"employee\s+id|student\s+id|patient\s+id|mrn|vin))\b" + _LABEL_SEP + _ID_VALUE), "ID", 1, True,
+     ("passport", "driver", "driving", "national", "ni ", "nhs", "medicare", "medicaid", "tax", "itin", "member",
+      "policy", "claim", "employee", "student", "patient", "mrn", "vin"), True),
+]
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_WINDOW_BEFORE, _WINDOW_AFTER = 120, 220  # longest lead before a trigger · label + separator + longest value
+
+
+def _hits(text: str, lower: str, triggers: tuple[_Trigger, ...]) -> list[int]:
+    hits: set[int] = set()
+    for t in triggers:
+        if isinstance(t, re.Pattern):
+            hits.update(m.start() for m in t.finditer(text))
+            continue
+        i = lower.find(t)
+        while i >= 0:
+            hits.add(i)
+            i = lower.find(t, i + 1)
+    return sorted(hits)
+
+
+def _windows(hits: list[int]) -> list[tuple[int, int]]:
+    """Merged [start, end) windows around trigger hits."""
+    out: list[tuple[int, int]] = []
+    for i in hits:
+        s, e = max(0, i - _WINDOW_BEFORE), i + _WINDOW_AFTER
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def identity_spans(text: str) -> list[tuple[int, int, str, str]]:
+    """Spans of the identity-shape layer: (start, end, kind, value)."""
+    out: list[tuple[int, int, str, str]] = []
+    seen: set[tuple[int, int]] = set()
+    lower = text.translate(_ASCII_LOWER)  # length-preserving, so offsets line up
+    for _name, pat, kind, grp, needs_digit, triggers, anchored in _IDENTITY:
+        if not triggers:
+            matches: Iterable[re.Match[str]] = pat.finditer(text)
+        elif anchored:
+            matches = filter(None, (pat.match(text, i) for i in _hits(text, lower, triggers)))
+        else:
+            matches = (m for ws, we in _windows(_hits(text, lower, triggers)) for m in pat.finditer(text, ws, we))
+        for m in matches:
+            value = m.group(grp)
+            if not value or (m.start(grp), m.end(grp)) in seen:
+                continue
+            if grp != 0 and _is_reference(value):
+                continue
+            if needs_digit and not any(c.isdigit() for c in value):
+                continue
+            seen.add((m.start(grp), m.end(grp)))
+            out.append((m.start(grp), m.end(grp), kind, value))
+    return out
 
 
 def _looks_like_credential(value: str) -> bool:
@@ -377,10 +531,11 @@ class ScrubResult:
 
 
 class Scrubber:
-    def __init__(self, rules_path: Path | None, terms_path: Path, strict: bool = False):
+    def __init__(self, rules_path: Path | None, terms_path: Path, strict: bool = False, shapes: bool = True):
         self.rules = Rules(rules_path)
         self.terms = PrivateTerms.load(terms_path)
         self.strict = strict
+        self.shapes = shapes
 
     def find_spans(self, text: str, *, secrets_only: bool = False) -> list[tuple[int, int, str, str]]:
         spans: list[tuple[int, int, str, str]] = []
@@ -397,6 +552,8 @@ class Scrubber:
         if not secrets_only:
             spans.extend(self.rules.spans(text, self.strict))
             spans.extend(self.terms.spans(text))
+            if self.shapes:
+                spans.extend(identity_spans(text))
             for m in _ENTROPY_RE.finditer(text):
                 if _looks_like_credential(m.group(0)):
                     spans.append((m.start(), m.end(), "SECRET", m.group(0)))

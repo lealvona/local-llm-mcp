@@ -49,9 +49,9 @@ def _check(cfg: Config) -> int:
     print(json.dumps(cfg.public(), indent=1), file=sys.stderr)
     from .observers import load_observer
 
-    scrub = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii)
+    scrub = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
     print(f"rules: {scrub.rules.source} ({len(scrub.rules.regex)} regex rules); private terms: {len(scrub.terms.items)}; "
-          f"observer: {load_observer(cfg).name}", file=sys.stderr)
+          f"identity shapes: {'on' if scrub.shapes else 'off'}; observer: {load_observer(cfg).name}", file=sys.stderr)
     s = Session(cfg)
     print(f"session: key={s.key} claude_pid={s.claude_pid} dir={s.dir}", file=sys.stderr)
 

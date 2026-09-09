@@ -62,7 +62,7 @@ package.
                                                 task + material ───────────────────────────► answer
                                              6. draft revises itself? one finalize call ───► committed answer
                                              7. SCRUB the answer (rules · secret shapes ·
-                                                private terms · every vault value)
+                                                identity shapes · private terms · every vault value)
                                              8. store artifact (raw) + turn (scrubbed)
  digest + trailer ◄──────────────────────── 9. return
                                              ...
@@ -187,7 +187,8 @@ the value.
 |---|---|---|
 | shape rules | emails, phone numbers, national ids, payment cards (Luhn-checked), IBANs, key prefixes, PEM headers | built in, or your rules file (`LOCAL_LLM_MCP_RULES`) |
 | secret shapes | PEM blocks, JWTs, bearer headers, well-known token prefixes, `KEY=value` lines, `password: …` / `password is …` assignments; in PII mode any 32+ character mixed letters-and-digits run outside a path or URL | built in |
-| private terms | the operator's own literal names, addresses, numbers — no regex knows a person's name | terms file (`LOCAL_LLM_MCP_PRIVATE_TERMS`) |
+| identity shapes (PII mode) | what identifies a person by shape alone, no seed data: street addresses and PO boxes, `City, ST 12345`, names introduced by an honorific (`Dr Example`), a form label (`patient: Jane Example`, `"name": "…"`), a mail header (`From: …`), a greeting (`Dear …,`) or a sign-off, dates of birth, labelled account and identity numbers (`account no. …`, `passport: …`, `NHS number …`) | built in; bounded regexes, low milliseconds per 100 KB; `LOCAL_LLM_MCP_SHAPES=0` turns it off |
+| private terms | the operator's own literal names, addresses, numbers — an unlabelled name has no shape | terms file (`LOCAL_LLM_MCP_PRIVATE_TERMS`) |
 | entity pass (PII mode) | whatever private values the worker itself finds in the material: names, addresses, dates of birth, credentials it recognises in context | one extra local call per delegation; only exact substrings of the material are accepted, never a label or a variable name |
 | known values | every value already in the vault, exact-matched | automatic |
 
@@ -197,7 +198,7 @@ Order of operations matters:
    the worker sees it. An echo in the answer is then caught by exact match even in a
    context no rule would recognise.
 2. The worker is instructed to write placeholders itself and never quote a secret.
-3. The answer is scrubbed (rules · secret shapes · terms · every vault value), then
+3. The answer is scrubbed (rules · secret shapes · identity shapes · terms · every vault value), then
    re-scanned; anything still detectable becomes `[REDACTED]`. A privacy boundary
    cannot rest on a model choosing to comply, so step 2 is help, not the guarantee.
 
@@ -306,6 +307,7 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | `120` | default command timeout, seconds |
 | `LOCAL_LLM_MCP_STRICT_PII` | `0` | treat every bare 10-digit run as a phone number (default: only formatted numbers or ones near phone words) |
 | `LOCAL_LLM_MCP_ENTITY_PASS` | `1` | PII mode: ask the worker for the private values before answering |
+| `LOCAL_LLM_MCP_SHAPES` | `1` | PII mode: the identity-shape layer (addresses, labelled names, dates of birth, labelled id numbers) |
 | `LOCAL_LLM_MCP_RULES` | built-in | JSON rules file (see below) |
 | `LOCAL_LLM_MCP_PRIVATE_TERMS` | `~/.config/local-llm-mcp/private_terms.json` | terms file (see below) |
 | `LOCAL_LLM_MCP_STATE_DIR` | `~/.local/state/local-llm-mcp` | sessions, pidmap |

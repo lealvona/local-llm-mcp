@@ -65,7 +65,7 @@ class AdminState:
     def __init__(self, cfg: Config, token: str = ""):
         self.cfg = cfg
         self.token = token
-        self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii)
+        self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
 
     # ---- terms -------------------------------------------------------------------
 
@@ -291,7 +291,7 @@ class AdminState:
             "sessions": len(sessions), "live": sum(1 for s in sessions if s["live"]),
             "placeholders": ph_total, "artifacts": sum(s["artifacts"] for s in sessions),
             "state_dir": str(self.cfg.state_dir), "state_bytes": sum(s["bytes"] for s in sessions),
-            "entity_pass": self.cfg.entity_pass, "strict_pii": self.cfg.strict_pii, "observer": self.cfg.observer or "none",
+            "entity_pass": self.cfg.entity_pass, "strict_pii": self.cfg.strict_pii, "shapes": self.cfg.shapes, "observer": self.cfg.observer or "none",
         }
 
 

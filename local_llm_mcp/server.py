@@ -39,7 +39,7 @@ class App:
         self.cfg = cfg
         self.session = Session(cfg)
         self.llm = LocalLLM(cfg)
-        self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii)
+        self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
         self.observer = load_observer(cfg)
         self.lock = asyncio.Lock()
         self.compacting: asyncio.Task | None = None

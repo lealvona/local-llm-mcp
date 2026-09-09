@@ -163,6 +163,7 @@ class Config:
     command_timeout: float
     strict_pii: bool
     entity_pass: bool
+    shapes: bool
     state_dir: Path
     sock_dir: Path
     rules_path: Path | None
@@ -199,6 +200,7 @@ class Config:
             command_timeout=_float("COMMAND_TIMEOUT", 120.0),
             strict_pii=_bool("STRICT_PII", False),
             entity_pass=_bool("ENTITY_PASS", True),
+            shapes=_bool("SHAPES", True),
             state_dir=_path("STATE_DIR", "~/.local/state/local-llm-mcp"),
             sock_dir=_path("SOCK_DIR", default_sock_dir()),
             rules_path=_opt_path("RULES"),

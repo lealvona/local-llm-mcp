@@ -25,7 +25,7 @@ Answer for that caller:
 
 PII_RULES = """PRIVACY MODE — your answer leaves this machine, the material must not.
 The material may contain personal data or secrets: names, home/postal addresses, phone numbers, personal email addresses, family details, account/card/IBAN numbers, credentials, passwords, API keys, tokens, private keys, vault contents.
-- Never write any of them, not even partially or reversed. Refer to people as [PERSON-n], addresses as [ADDRESS-n], phone numbers as [PHONE-n], emails as [EMAIL-n], account/card numbers as [ACCOUNT-n], credentials/keys/tokens/passwords as [SECRET-n].
+- Never write any of them, not even partially or reversed. Refer to people as [PERSON-n], addresses as [ADDRESS-n], phone numbers as [PHONE-n], emails as [EMAIL-n], account/card numbers as [ACCOUNT-n], dates of birth as [DOB-n], other identity numbers (passport, licence, policy, patient) as [ID-n], credentials/keys/tokens/passwords as [SECRET-n].
 - Reuse a placeholder that already appears in the session memory or the material for the same value; number new ones from the next free index.
 - Describe what was done with private data ("authenticated with [SECRET-1]", "the message is addressed to [EMAIL-2]"), never the data itself.
 - Public, technical identifiers (paths, hostnames, LAN IPs, service names, version numbers, error strings) are NOT private: keep them exact.
@@ -94,7 +94,7 @@ DRAFT>>>"""
 # PII mode: before answering, the worker lists every private value it can see.
 # Those values are registered server-side so the deterministic scrub catches
 # them exactly — a regex knows the SHAPE of an email, not a person's name.
-ENTITY_SYSTEM = """You extract personal and private data from material. Output ONLY a JSON array of objects {"kind": K, "value": V} where K is one of PERSON, ADDRESS, PHONE, EMAIL, ACCOUNT, SECRET, PII and V is the value copied EXACTLY as it appears in the material (same spelling, spacing and case). Include: every person's name (each form it appears in), postal/home address, phone number, email address, account/card/IBAN/routing number, date of birth, credential/password/API key/token/private key, and any other detail that identifies or belongs to a private individual. For a credential, V is the secret VALUE itself (the token or password string), never the variable name, label or key that names it. Public technical identifiers (paths, hostnames, LAN IPs, service names, versions, error strings, variable names) are NOT private. No commentary, no markdown fence, empty array [] if nothing."""
+ENTITY_SYSTEM = """You extract personal and private data from material. Output ONLY a JSON array of objects {"kind": K, "value": V} where K is one of PERSON, ADDRESS, PHONE, EMAIL, ACCOUNT, DOB, ID, SECRET, PII and V is the value copied EXACTLY as it appears in the material (same spelling, spacing and case). Include: every person's name (each form it appears in), postal/home address, phone number, email address, account/card/IBAN/routing number, date of birth, credential/password/API key/token/private key, and any other detail that identifies or belongs to a private individual. For a credential, V is the secret VALUE itself (the token or password string), never the variable name, label or key that names it. Public technical identifiers (paths, hostnames, LAN IPs, service names, versions, error strings, variable names) are NOT private. No commentary, no markdown fence, empty array [] if nothing."""
 
 ENTITY_USER = """MATERIAL:
 <<<MATERIAL
