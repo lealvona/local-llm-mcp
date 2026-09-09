@@ -111,16 +111,21 @@ class Scanner:
             self.hits.append(f"{where}: attribution trailer (Co-Authored-By / generated-with) is not accepted")
 
     def identity(self, name: str, email: str, role: str, where: str) -> None:
-        # read the identity from the config FILES (this repository's, else the user's), so that a
-        # one-off `git -c user.email=...` override is compared against the standing identity, not itself
-        exp_name = (git("config", "--local", "--get", "user.name", check=False).strip()
-                    or git("config", "--global", "--get", "user.name", check=False).strip())
-        exp_email = (git("config", "--local", "--get", "user.email", check=False).strip()
-                     or git("config", "--global", "--get", "user.email", check=False).strip())
+        exp_name, exp_email = expected_identity()
         if not exp_email:
             self.hits.append(f"{where}: no user.email configured for this repository; refusing to guess an identity")
         elif (name, email) != (exp_name, exp_email):
             self.hits.append(f"{where}: {role} is {name} <{email}>, not the configured {exp_name} <{exp_email}>")
+
+
+def expected_identity() -> tuple[str, str]:
+    """The standing identity from the config FILES (this repository's, else the user's) — so that a
+    one-off `git -c user.email=...` override is compared against it rather than against itself."""
+    name = (git("config", "--local", "--get", "user.name", check=False).strip()
+            or git("config", "--global", "--get", "user.name", check=False).strip())
+    email = (git("config", "--local", "--get", "user.email", check=False).strip()
+             or git("config", "--global", "--get", "user.email", check=False).strip())
+    return name, email
 
 
 def scan_tree(s: Scanner) -> None:
@@ -165,11 +170,17 @@ def commits(spec: str | None, everything: bool) -> list[str]:
 
 
 def scan_commits(s: Scanner, revs: list[str]) -> None:
+    # A history scan on a machine with no configured identity (CI, a fresh clone) checks everything
+    # else and says so; the commit-msg and pre-push hooks run where the identity IS configured.
+    check_identity = bool(expected_identity()[1])
+    if not check_identity:
+        print("publiccheck: no user.email configured here — identities not checked in this history scan")
     for c in reversed(revs):
         short = c[:7]
         an, ae, cn, ce, body = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", c).split("\0", 4)
-        s.identity(an, ae, "author", f"commit {short}")
-        s.identity(cn, ce, "committer", f"commit {short}")
+        if check_identity:
+            s.identity(an, ae, "author", f"commit {short}")
+            s.identity(cn, ce, "committer", f"commit {short}")
         s.message(body, f"commit {short} message")
         for line in git("ls-tree", "-r", "-z", c).split("\0"):
             if not line:

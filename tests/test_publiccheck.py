@@ -117,6 +117,18 @@ def test_range_and_all_scan_every_commit_tree_not_only_diffs(repo):
     assert r.returncode == 0  # the tree alone is clean — which is exactly why the push gate scans commits
 
 
+def test_history_scan_without_an_identity_checks_everything_else(repo):
+    work, g = repo
+    (work / "g.py").write_text("z = 3\n")
+    g("add", "g.py")
+    g("commit", "-q", "--no-verify", "-m", "add g\n\nCo-Authored-By: Robot <robot@example.org>")
+    env = {**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(work.parent / "deny.txt"), "GIT_CONFIG_GLOBAL": str(work.parent / "gitconfig")}
+    g("config", "--unset", "user.email")
+    r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode == 1 and "identities not checked" in r.stdout and "attribution trailer" in r.stderr
+    assert "no user.email" not in r.stderr  # the missing identity is a note, not a refusal, in a history scan
+
+
 def test_this_repository_history_is_clean():
     r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
