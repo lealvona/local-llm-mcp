@@ -20,7 +20,7 @@ CHECKS = [
     ("private IPv4 address", re.compile(
         r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
         r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b(?!/\d)")),
-    ("home directory path", re.compile(r"(?<![A-Za-z0-9_])/home/(?!placeholder)[a-z][a-z0-9_-]*/")),
+    ("home directory path", re.compile(r"(?<![A-Za-z0-9_])/home/[a-z][a-z0-9_-]*/")),
     ("non-example email address", re.compile(
         r"\b[A-Za-z0-9._%+-]+@(?!example\.(?:org|com|net)\b|users\.noreply\.github\.com\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
     ("tailnet hostname", re.compile(r"\b[a-z0-9-]+\.[a-z0-9]+\.ts\.net\b")),
