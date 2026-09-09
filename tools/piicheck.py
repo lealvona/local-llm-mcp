@@ -28,7 +28,7 @@ VALUES = {
     "ssn": "123-45-6789",
     "dob": "03/14/1988",
     "password": "Tr0ub4dor&3-Quill",  # gitleaks:allow (synthetic)
-    "key": "sk-synthetic0123456789abcdefghijklmn",  # gitleaks:allow (synthetic)
+    "key": "sk-q7v2kx9mz4rt8pl3wn6ycb1hd5fg0js2",  # gitleaks:allow (synthetic; no dictionary word, so the fragment check cannot match prose)
 }
 FILLER = ("Minutes of the allotment committee. The compost rota was agreed. Rainwater butts need new taps. "
           "The shed roof will be re-felted in October. Membership fees stay unchanged.\n") * 400  # ~30 KB
@@ -108,8 +108,10 @@ async def run_mode(mode: str, state: str, doc_path: str) -> tuple[int, int]:
             st = text(await s.call_tool("local_llm_status", {}))
             check(not leaks(st), "status (memory summary, turns) carries nothing private" + (": LEAK " + ", ".join(leaks(st)) if leaks(st) else ""))
             if refs:
+                n_lines = document().count("\n") + 1
                 art = text(await s.call_tool("local_llm_artifact", {"ref": refs[0], "line_start": 1, "line_end": 12}))
-                check(not leaks(art), "artifact slice carries nothing private" + (": LEAK " + ", ".join(leaks(art)) if leaks(art) else ""))
+                art += text(await s.call_tool("local_llm_artifact", {"ref": refs[0], "line_start": max(1, n_lines - 3), "line_end": n_lines}))  # the postscript: past the material entity-pass window
+                check(not leaks(art), "artifact slices (head + the deep postscript) carry nothing private" + (": LEAK " + ", ".join(leaks(art)) if leaks(art) else ""))
             comp = text(await s.call_tool("local_llm_compact", {"reason": "piicheck"}))
             st2 = json.loads(text(await s.call_tool("local_llm_status", {})))
             bad = leaks(comp) + leaks(st2.get("summary", ""))

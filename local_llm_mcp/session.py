@@ -210,6 +210,21 @@ class Session:
         self.meta["armed"] = rec
         self._save_meta()
 
+    def note_leak_check(self, ok: bool, error: str = "") -> None:
+        """Count every answer pass (item: the guarantee's last line) and every failure, so status and the
+        admin app can show when the deterministic layers were left on their own."""
+        rec = dict(self.meta.get("leak_check") or {}) if isinstance(self.meta.get("leak_check"), dict) else {}
+        rec["ran"] = int(rec.get("ran") or 0) + 1
+        if not ok:
+            rec["failed"] = int(rec.get("failed") or 0) + 1
+            rec["last_failure"] = {"ts": _now_iso(), "error": error}
+        self.meta["leak_check"] = rec
+        self._save_meta()
+
+    def leak_check(self) -> dict:
+        rec = self.meta.get("leak_check") if isinstance(self.meta.get("leak_check"), dict) else {}
+        return {"ran": int(rec.get("ran") or 0), "failed": int(rec.get("failed") or 0), "last_failure": rec.get("last_failure")}
+
     def bump_armed_asks(self) -> int:
         rec = dict(self.meta.get("armed") or {}) if isinstance(self.meta.get("armed"), dict) else {}
         rec["asked"] = int(rec.get("asked") or 0) + 1
@@ -418,6 +433,7 @@ class Session:
             "summary_chars": len(self.summary()),
             "compactions": int(self.meta.get("compactions", 0)),
             "last_compaction": self.meta.get("last_compaction"),
+            "leak_check": self.leak_check(),
             "placeholders": self.vault.counts(),
             "artifacts": self.artifact_count(),
             "created": self.meta.get("created"),

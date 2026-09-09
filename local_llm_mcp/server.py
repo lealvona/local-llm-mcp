@@ -405,17 +405,38 @@ class App:
         return result
 
     async def answer_pass(self, answer: str) -> tuple[int, bool]:
-        """PII mode's last line: ask the worker what private values the ANSWER still holds (it is
-        short, so this covers it whole — unlike the material pass, bounded to two chunks), register
-        them, and let the caller re-scrub. Returns (values registered, pass ran)."""
+        """The last line wherever identity is masked: ask the worker what private values this OUTBOUND text
+        (a result, a compaction summary, an artifact slice) still holds — it is short, so this covers it
+        whole, unlike the material pass, bounded to two chunks — register them, and let the caller
+        re-scrub. Returns (values registered, pass ran). Every run and every failure is counted on the
+        session, so a weakened guarantee is visible in status and the admin app."""
         try:
             text, _u = await self.llm.chat(prompts.ENTITY_SYSTEM, prompts.ENTITY_USER.format(material=answer),
                                            max_tokens=1024, temperature=0.0)
             found = prompts.parse_entities(text)
-            return self.scrubber.register_entities(found, answer, self.session.vault), True
+            n = self.scrubber.register_entities(found, answer, self.session.vault)
+            self.session.note_leak_check(True)
+            return n, True
         except Exception as exc:
             log.warning("answer leak-check failed: %s", exc)
+            self.session.note_leak_check(False, str(exc)[:160])
             return 0, False
+
+    def identity_masked(self) -> bool:
+        """True while the effective policy masks identity (PII mode; ASSIST until the user opens it)."""
+        return not (self.policy().open & set(TIERS["identity"]))
+
+    async def outbound_slice(self, piece: str) -> tuple[ScrubResult, str]:
+        """An artifact slice leaves through the same layers as a result: the scrub, then — while identity
+        is masked — the answer pass over the slice itself, so a bare name deep in a large file that no
+        answer ever mentioned cannot leave through this channel. Returns (scrubbed, trailer note)."""
+        scrubbed = self.outbound(piece)
+        if not scrubbed.text or not self.identity_masked():
+            return scrubbed, ""
+        found, ran = await self.answer_pass(scrubbed.text)
+        if found:
+            scrubbed = self.outbound(scrubbed.text)
+        return scrubbed, ("leak-check ok" if ran else "leak-check FAILED (deterministic layers only)")
 
     async def entity_pass(self, material: str) -> int:
         """Ask the worker what private values the material holds; register them.
@@ -735,15 +756,15 @@ def build(cfg: Config) -> FastMCP:
             lines = raw.split("\n")
             end = min(len(lines), line_end or line_start + 199)
             piece = vb.number_lines(lines[line_start - 1:end], line_start) if line_start <= len(lines) else ""
-            scrubbed = a.outbound(piece)
+            scrubbed, leak = await a.outbound_slice(piece)
             trailer = App._trailer([f"artifact {ref}", f"lines {line_start}-{end} of {len(lines)}",
-                                    f"next line {end + 1}" if end < len(lines) else "end", scrubbed.trailer()])
+                                    f"next line {end + 1}" if end < len(lines) else "end", leak, scrubbed.trailer()])
             return scrubbed.text + trailer
         piece = raw[offset:offset + limit]
-        scrubbed = a.outbound(piece)
+        scrubbed, leak = await a.outbound_slice(piece)
         has_more = offset + limit < len(raw)
         trailer = App._trailer([f"artifact {ref}", f"chars {offset}-{min(offset + limit, len(raw))} of {len(raw)}",
-                                f"next offset {offset + limit}" if has_more else "end", scrubbed.trailer()])
+                                f"next offset {offset + limit}" if has_more else "end", leak, scrubbed.trailer()])
         return scrubbed.text + trailer
 
     @mcp.tool(

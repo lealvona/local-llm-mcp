@@ -233,7 +233,7 @@ the value.
 | private terms | the operator's own literal names, addresses, numbers — an unlabelled name has no shape | terms file (`LOCAL_LLM_MCP_PRIVATE_TERMS`) |
 | entity pass (PII mode) | whatever private values the worker itself finds in the material: names, addresses, dates of birth, credentials it recognises in context | one extra local call per delegation; only exact substrings of the material are accepted, never a label or a variable name |
 | known values | every value already in the vault, exact-matched | automatic |
-| answer pass (PII mode) | after the scrub, the worker is asked what private values the ANSWER still holds — the answer is short, so this covers it whole, unlike the material pass (first two chunks); anything found is registered and the answer re-scrubbed; the trailer says `leak-check ok`, or `leak-check FAILED` when the pass could not run | one short local call per PII-mode result |
+| answer pass (while identity is masked) | after the scrub, the worker is asked what private values the OUTBOUND text still holds — every result, every compaction summary and every artifact slice, in PII mode and in ASSIST until the user opens identity; the text is short, so this covers it whole, unlike the material pass (first two chunks); anything found is registered and the text re-scrubbed; the trailer says `leak-check ok`, or `leak-check FAILED` when the pass could not run. Runs and failures are counted per session (`leak_check` in status, a warning chip in the admin app) so a weakened guarantee is never silent | one short local call per outbound text |
 
 Order of operations matters:
 
@@ -336,7 +336,11 @@ model's tokens per character relative to the worker's, applied at pricing time o
 stays in worker tokens). Seeded at 1.3 for the Claude 4.7+ tokenizer family from Anthropic's own
 note that it yields roughly 30 % more tokens, 1.0 (assumed equal) everywhere else; editable per
 row in the admin app and the override file. The status block and the admin table show which
-factor priced the headline.
+factor priced the headline. **Measure it instead of assuming it**: `tools/measure_tokenizer.py`
+counts public text only (this repository's README, source and price table, plus synthesized
+listings, process tables and journal lines) with the worker's tokenizer and with Anthropic's
+token-count endpoint, prints the ratio per text class, and with `--write` sets each row's factor
+in the override file from the measurement. Nothing private ever leaves the machine for this.
 
 Dollars are **list prices** per 1M tokens for flagship models of every major provider, read
 from the providers' own pricing pages and stamped with the date they were checked
@@ -674,6 +678,7 @@ uv sync
 .venv/bin/python tools/smoke.py                      # end to end over stdio against your configured model
 .venv/bin/python tools/leakcheck.py ~/.secrets/app.env   # a REAL secrets file through PII mode; asserts no value leaks
 .venv/bin/python tools/piicheck.py                   # adversarial tasks over SYNTHETIC private data, PII mode + ASSIST default: nothing may come back
+ANTHROPIC_API_KEY=… .venv/bin/python tools/measure_tokenizer.py [--write]   # tokenizer factors from PUBLIC text, never from turns
 python tools/publiccheck.py --all                    # every commit in the history: nothing personal, no stray identity or trailer
 ```
 

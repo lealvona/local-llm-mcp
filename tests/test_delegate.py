@@ -162,3 +162,33 @@ def test_compaction_summary_gets_the_answer_pass_while_identity_is_masked(monkey
     run(app, kind="delegate", task="t", material="m" * 50, source="paths: f", max_output_chars=500)
     res = asyncio.run(app.compact("test"))
     assert res.get("ok") and "Pim Osterhagen" not in app.session.summary() and "[PERSON-" in app.session.summary()
+
+
+def test_artifact_slice_gets_the_answer_pass_and_failures_are_counted(monkeypatch, tmp_path):
+    import asyncio
+    app = make_app(monkeypatch, tmp_path)
+
+    async def chat(system, user, *, max_tokens, temperature=0.2):
+        if "Lucasta Wrenholm" in user:
+            return '[{"kind": "PERSON", "value": "Lucasta Wrenholm"}]', {}
+        return "[]", {}
+    app.llm.chat = chat
+    piece = "line 401\nPS — the plot goes to Lucasta Wrenholm, who prefers mornings.\n"
+    scrubbed, note = asyncio.run(app.outbound_slice(piece))
+    assert "Lucasta Wrenholm" not in scrubbed.text and "[PERSON-1]" in scrubbed.text and note == "leak-check ok"
+    assert app.session.leak_check() == {"ran": 1, "failed": 0, "last_failure": None}
+    d = app.session.disclosure
+    d.set(identity="open", numbers="masked", source="tool")
+    app.session.set_disclosure(d)
+    scrubbed2, note2 = asyncio.run(app.outbound_slice("Pim Osterhagen said hello"))
+    assert "Pim Osterhagen" in scrubbed2.text and note2 == ""  # identity open: no pass, no note, no count
+
+    async def broken(system, user, *, max_tokens, temperature=0.2):
+        raise RuntimeError("worker down")
+    app.llm.chat = broken
+    d.set(identity="masked", numbers="masked", source="tool")
+    app.session.set_disclosure(d)
+    scrubbed3, note3 = asyncio.run(app.outbound_slice("Zed Quillfeather again"))
+    assert note3.startswith("leak-check FAILED") and app.session.leak_check()["failed"] == 1 and app.session.leak_check()["ran"] == 2
+    assert app.session.leak_check()["last_failure"]["error"] == "worker down"
+    assert app.session.status()["leak_check"]["failed"] == 1
