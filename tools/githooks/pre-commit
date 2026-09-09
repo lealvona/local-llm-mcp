@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Nothing deployment-specific or personal may be recorded: scan what this commit would record,
+# then (when installed) gitleaks for secret shapes. Install with tools/install-hooks.sh.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+python3 "$here/../publiccheck.py" --staged || exit 1
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --redact --no-banner
+  code=$?
+  if [ "$code" -eq 1 ]; then
+    echo "publiccheck: gitleaks found a possible secret in the staged changes (value redacted above)." >&2
+    echo "  false positive: add '# gitleaks:allow' on that line. Real secret: remove it and rotate it." >&2
+    exit 1
+  elif [ "$code" -gt 1 ]; then
+    echo "publiccheck: gitleaks could not run (exit $code); the content scan above still passed." >&2
+  fi
+fi
+exit 0

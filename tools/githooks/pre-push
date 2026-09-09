@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The last gate before publication: every commit this push would make public is checked in full —
+# identity, message, trailers, file names and the whole tree at that commit — so a commit made
+# with --no-verify, a rebase, a cherry-pick or an amend cannot slip past the earlier hooks.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+z=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  [ "$local_sha" = "$z" ] && continue                      # deleting a remote ref publishes nothing
+  if [ "${remote_sha:-$z}" = "$z" ] || ! git cat-file -e "$remote_sha" 2>/dev/null; then
+    spec="$local_sha"                                      # new branch, or an unknown remote tip: everything not on a remote
+  else
+    spec="$remote_sha..$local_sha"
+  fi
+  python3 "$here/../publiccheck.py" --range "$spec" || status=1
+done
+exit $status

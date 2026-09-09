@@ -13,6 +13,8 @@ jobs:
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -30,3 +32,5 @@ jobs:
           node --check /tmp/spa.js
       - name: Nothing deployment-specific in the tree
         run: python tools/publiccheck.py
+      - name: Nothing deployment-specific or personal in any commit
+        run: python tools/publiccheck.py --all

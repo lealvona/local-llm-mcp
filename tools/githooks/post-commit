@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Optional: push every commit as soon as it lands (the pre-push gate still runs).
+# Enable per clone with:  tools/install-hooks.sh --autopush   (git config local-llm-mcp.autopush true)
+if [ "$(git config --bool --get local-llm-mcp.autopush 2>/dev/null)" = "true" ]; then
+  git push --quiet || echo "post-commit: the push was refused or failed; the commit is local only." >&2
+fi
+exit 0

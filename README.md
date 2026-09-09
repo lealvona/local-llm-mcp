@@ -617,6 +617,28 @@ Point Claude Code at `$INST/venv/bin/local-llm-mcp` and the hook copy; edit the 
 run the script, and new sessions pick up the change. Version the config directory
 privately if you like (ignore `*.key`).
 
+### The git gate — nothing personal reaches a commit, a message, or a push
+
+The separation above is enforced at the repository, not by care. `tools/install-hooks.sh`
+points a clone at the tracked hooks in `tools/githooks/`, and every one of them calls
+`tools/publiccheck.py`:
+
+| Hook | Refuses |
+|---|---|
+| `pre-commit` | staged content or file names carrying a private network address, a home-directory path, a non-example e-mail, a tailnet name, or a denylisted term; then `gitleaks` on the staged changes when it is installed |
+| `commit-msg` | the same terms in the message; any attribution trailer (`Co-Authored-By`, "generated with"); an author or committer other than the identity configured for the repository (`--author`, `GIT_AUTHOR_*`, `-c user.email` are all caught) |
+| `pre-push` | every commit the push would publish, checked in full — identity, message, file names and the whole tree at that commit — so a commit made with `--no-verify`, a rebase, a cherry-pick or an amend cannot slip past the earlier two |
+| `post-commit` | nothing; with `--autopush` it pushes each commit as it lands, still through `pre-push` |
+
+The **denylist** is a private file the repository never sees — one term per line in
+`$LOCAL_LLM_MCP_DENYLIST` (default `~/.config/local-llm-mcp/publiccheck-denylist.txt`):
+your user name, host names, model aliases, domains, anything that identifies you or your
+network. Terms match case-insensitively on word boundaries and are reported by line
+number, never by value, so a refusal can be pasted anywhere. CI runs the tree check and
+`--all` over the whole history on every push; `python tools/publiccheck.py --all` is the
+same proof locally. A tree line may opt out with `public:allow` when it names an address
+range on purpose; messages, file names and identities cannot.
+
 ## State on disk
 
 ```
@@ -640,6 +662,7 @@ uv sync
 .venv/bin/python -m pytest -q                       # scrubber, vault, rules file, dotenv, entity registration, verbatim helpers, admin API
 .venv/bin/python tools/smoke.py                      # end to end over stdio against your configured model
 .venv/bin/python tools/leakcheck.py ~/.secrets/app.env   # a REAL secrets file through PII mode; asserts no value leaks
+python tools/publiccheck.py --all                    # every commit in the history: nothing personal, no stray identity or trailer
 ```
 
 The smoke client exercises: initialize (instructions carry the mode), tool listing,
