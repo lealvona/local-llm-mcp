@@ -179,6 +179,18 @@ def test_unknown_command_asks_and_once_does_not_persist(monkeypatch, tmp_path):
     assert len(ctx2.messages) == 1
 
 
+def test_always_teaches_every_shape_the_command_needs(monkeypatch, tmp_path):
+    app = armed(make_app(monkeypatch, tmp_path))
+    ctx = FakeCtx(can_ask=True, choice="always")
+    may, _t, label = approve(app, ctx, "ls -la /etc | head -60")
+    assert may and label == "asked:always (ls*, head*)"
+    assert "ls*, head*" in ctx.messages[0]
+    # both halves were learned, so the very same command is not asked about again
+    ctx2 = FakeCtx(can_ask=True, choice="refuse")
+    may, _t, label = approve(app, ctx2, "ls -la /etc | head -60")
+    assert may and ctx2.messages == [] and label == "allow-list (ls*, head*)"
+
+
 def test_always_writes_the_shape_and_stops_asking(monkeypatch, tmp_path):
     app = armed(make_app(monkeypatch, tmp_path))
     ctx = FakeCtx(can_ask=True, choice="always")

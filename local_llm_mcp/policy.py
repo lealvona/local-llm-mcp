@@ -211,17 +211,26 @@ def _program(tokens: Sequence[str]) -> tuple[str, list[str]]:
 
 
 def shape_for(command: str) -> str:
-    """The glob to remember when the user says "always allow this shape": the program (plus its
-    subcommand, for a multiplexer like git) and a trailing ``*``. Falls back to the exact command
-    when there is nothing to generalise."""
-    segs = split_segments(command)
-    tokens = _tokens(segs[0]) if segs else []
-    prog, args = _program(tokens)
+    """The glob for ONE segment: the program (plus its subcommand, for a multiplexer like git) and
+    a trailing ``*``. Falls back to the exact text when there is nothing to generalise."""
+    prog, args = _program(_tokens(command))
     if not prog:
         return command.strip()
     if prog in SUBCOMMAND_PROGRAMS and args and not args[0].startswith("-"):
         return f"{prog} {args[0]}*"
     return f"{prog}*"
+
+
+def shapes_for(command: str) -> list[str]:
+    """Every shape "always allow" must remember for this command line. A match needs every segment,
+    so ``git log … | head -5`` teaches two shapes, not one — otherwise "always" would answer the
+    dialog and then ask again on the very next identical command."""
+    out: list[str] = []
+    for seg in split_segments(command) or [command.strip()]:
+        sh = shape_for(seg)
+        if sh and sh not in out:
+            out.append(sh)
+    return out
 
 
 def _expand(token: str) -> str:
@@ -349,6 +358,10 @@ class AllowList:
                 return ""
         return ", ".join(dict.fromkeys(hit))
 
+    def add_all(self, globs: Sequence[str]) -> bool:
+        """Append every shape a command needs. False when any of them could not be written."""
+        return all([self.add(g) for g in globs]) and bool(globs)
+
     def add(self, glob: str) -> bool:
         """Append a glob (idempotent). Returns False when there is nowhere to write it."""
         glob = glob.strip()
@@ -407,7 +420,7 @@ def check(command: str, allow: AllowList | None = None, secrets: Iterable[str] =
     return Decision("ask")
 
 
-def dialog_message(command: str, cwd: str, shape: str) -> str:
+def dialog_message(command: str, cwd: str, shapes: Sequence[str]) -> str:
     """What the human sees: the exact command, in full."""
     shown = command if len(command) <= 900 else command[:880] + " …(truncated for display)"
     where = cwd or "the server's own working directory"
@@ -417,7 +430,7 @@ def dialog_message(command: str, cwd: str, shape: str) -> str:
         f"Working directory: {where}\n"
         f"• refuse — {CHOICE_TEXT['refuse']}\n"
         f"• once — {CHOICE_TEXT['once']}\n"
-        f"• always — {CHOICE_TEXT['always']} ({shape})\n"
+        f"• always — {CHOICE_TEXT['always']} ({', '.join(shapes)})\n"
         "Cancel refuses it."
     )
 

@@ -153,10 +153,10 @@ class App:
             return False, ("[local-llm-mcp] REFUSED: this session has already asked the user about "
                            f"{cp.MAX_ASKS} commands. Nothing was run. The user can add the shapes they want "
                            f"to allow to {self.cfg.run_allow_path}."), "refused: ask limit"
-        shape = cp.shape_for(command)
+        shapes = cp.shapes_for(command)
         action, choice = "error", ""
         try:
-            res = await asyncio.wait_for(ctx.elicit(cp.dialog_message(command, cwd, shape), cp.RunChoice),
+            res = await asyncio.wait_for(ctx.elicit(cp.dialog_message(command, cwd, shapes), cp.RunChoice),
                                          timeout=self.cfg.dialog_timeout)
             action = str(res.action)
             if action == "accept" and res.data is not None:
@@ -173,11 +173,12 @@ class App:
             return False, (cp.user_refusal_text(command) if refused else cp.unanswered_text(action)), \
                 (f"refused: user" if refused else f"refused: {action}")
         if choice == "always":
-            written = self.allow.add(shape)
-            self.session.note_run_policy("asked_always", shape)
+            written = self.allow.add_all(shapes)
+            label = ", ".join(shapes)
+            self.session.note_run_policy("asked_always", label)
             self.observer.event("execute_tool", "local_llm.policy",
-                                {"verdict": "always", "rule": shape, "session": self.session.key})
-            return True, "", f"asked:always ({shape})" if written else f"asked:run (could not write {self.cfg.run_allow_path})"
+                                {"verdict": "always", "rule": label, "session": self.session.key})
+            return True, "", f"asked:always ({label})" if written else f"asked:run (could not write {self.cfg.run_allow_path})"
         self.session.note_run_policy("asked_once")
         self.observer.event("execute_tool", "local_llm.policy", {"verdict": "once", "session": self.session.key})
         return True, "", "asked:run"
