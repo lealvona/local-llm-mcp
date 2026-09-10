@@ -234,7 +234,7 @@ def scan_tag(s: Scanner, ref: str) -> None:
     header, _, msg = body.partition("\n\n")
     s.message(msg, f"tag {ref} message")
     m = re.search(r"^tagger (.*?) <([^>]*)> \d+ [+-]\d{4}$", header, re.M)
-    if m:
+    if m and expected_identity()[1]:  # same guard as scan_commits: a machine with no identity cannot judge one
         s.identity(m.group(1), m.group(2), "tagger", f"tag {ref}")
 
 

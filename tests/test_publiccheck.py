@@ -198,6 +198,21 @@ def test_an_annotated_tag_message_and_tagger_are_scanned(repo):
     assert r.returncode == 1 and "annotated tag" not in r.stdout  # refused, so no clean line
 
 
+def test_a_tag_is_scanned_without_an_identity_configured(repo, tmp_path):
+    """CI has no user.email. Commit scanning already skipped identities there; tag scanning must too,
+    or every history scan on a runner refuses on the tagger alone."""
+    work, g = repo
+    g("tag", "-a", "v8", "-m", "ordinary release note")
+    g("config", "--unset", "user.email", check=False)
+    env = {k: v for k, v in os.environ.items() if k != "LOCAL_LLM_MCP_DENYLIST"}
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")
+    env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")  # or the real user's identity leaks in as "expected"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "annotated tag" in r.stdout and "no user.email" not in r.stderr
+
+
 def test_a_mistyped_denylist_path_refuses_instead_of_degrading(repo, tmp_path):
     """Unset means "no list" (CI). Set-but-absent means a typo, and must not silently disable the names."""
     work, g = repo
