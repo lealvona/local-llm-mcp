@@ -221,11 +221,12 @@ def test_the_package_ships_no_instance_material(tmp_path):
 def test_this_repository_history_is_clean(tmp_path):
     """Every commit and tag of THIS repository passes the shape checks.
 
-    The denylist is deliberately pinned to an absent file: it lives outside the repository and differs
+    The denylist is deliberately absent: it lives outside the repository and differs
     per operator, so including it here would make this test pass on CI and fail on a machine whose list
     happens to be wider. The denylist proof is the hooks' job, on the machine that authors the commit.
     """
-    env = {**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(tmp_path / "no-denylist.txt")}
+    env = {k: v for k, v in os.environ.items() if k != "LOCAL_LLM_MCP_DENYLIST"}
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")  # unset, not mistyped: "no list", as CI runs
     r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "NO DENYLIST was found" in r.stdout  # and it says so, rather than reporting "clean"
