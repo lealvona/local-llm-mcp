@@ -15,5 +15,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     spec="$remote_sha..$local_sha"
   fi
   python3 "$here/../publiccheck.py" --range "$spec" || status=1
+  case "$remote_ref" in
+    refs/tags/*) python3 "$here/../publiccheck.py" --tag "$local_sha" || status=1 ;;
+  esac
 done
 exit $status

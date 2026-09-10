@@ -12,7 +12,14 @@ if command -v gitleaks >/dev/null 2>&1; then
     echo "  false positive: add '# gitleaks:allow' on that line. Real secret: remove it and rotate it." >&2
     exit 1
   elif [ "$code" -gt 1 ]; then
-    echo "publiccheck: gitleaks could not run (exit $code); the content scan above still passed." >&2
+    if [ "${LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS:-}" = "1" ]; then
+      echo "publiccheck: gitleaks could not run (exit $code); allowed by LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS=1." >&2
+    else
+      echo "publiccheck: gitleaks is installed but could not run (exit $code) — refusing rather than" >&2
+      echo "  recording a commit no secret scanner has read. Fix it, or commit once with" >&2
+      echo "  LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS=1 (the content and identity gates still run)." >&2
+      exit 1
+    fi
   fi
 fi
 exit 0

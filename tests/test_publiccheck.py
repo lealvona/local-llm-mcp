@@ -233,6 +233,35 @@ def test_the_package_ships_no_instance_material(tmp_path):
     assert "/local_llm_mcp/prices.json" not in ignored  # the package's own table stays tracked
 
 
+def test_a_gitleaks_that_cannot_run_refuses_the_commit(repo, tmp_path):
+    """A secret scanner that errors must not read as a pass. This regressed once, silently."""
+    work, g = repo
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "gitleaks").write_text("#!/bin/sh\nexit 3\n")
+    (fake / "gitleaks").chmod(0o755)
+    (work / "a.py").write_text("x = 1\n")
+    g("add", "a.py")
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}
+    r = subprocess.run(["git", "commit", "-q", "-m", "probe"], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and "could not run" in r.stderr and "refusing" in r.stderr
+    env["LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS"] = "1"
+    r = subprocess.run(["git", "commit", "-q", "-m", "probe"], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "allowed by" in r.stderr
+
+
+def test_pushing_a_tag_scans_the_tag_object(repo, tmp_path):
+    """pre-push must scan an annotated tag: rev-list shows neither its message nor its tagger."""
+    work, g = repo
+    assert "refs/tags/" in (ROOT / "tools/githooks/pre-push").read_text()
+    g("tag", "-a", "v7", "-m", "cut for host-zebra")
+    r = g("push", "-q", "origin", "v7", check=False)
+    assert r.returncode != 0 and "denylist term #3" in r.stderr
+    g("tag", "-d", "v7")
+    g("tag", "-a", "v7", "-m", "an ordinary release")
+    assert g("push", "-q", "origin", "v7").returncode == 0
+
+
 def test_this_repository_history_is_clean(tmp_path):
     """Every commit and tag of THIS repository passes the shape checks.
 
