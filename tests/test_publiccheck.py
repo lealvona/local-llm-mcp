@@ -198,6 +198,26 @@ def test_an_annotated_tag_message_and_tagger_are_scanned(repo):
     assert r.returncode == 1 and "annotated tag" not in r.stdout  # refused, so no clean line
 
 
+def test_a_mistyped_denylist_path_refuses_instead_of_degrading(repo, tmp_path):
+    """Unset means "no list" (CI). Set-but-absent means a typo, and must not silently disable the names."""
+    work, g = repo
+    env = {**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(tmp_path / "typo.txt")}
+    r = subprocess.run([sys.executable, str(CHECK)], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode == 2 and "does not exist" in r.stderr
+    env.pop("LOCAL_LLM_MCP_DENYLIST")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")
+    r = subprocess.run([sys.executable, str(CHECK)], cwd=work, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "NO DENYLIST was found" in r.stdout
+
+
+def test_the_package_ships_no_instance_material(tmp_path):
+    """A source distribution must not carry a deployment's dotenv, keys, terms or price override."""
+    ignored = (Path(ROOT) / ".gitignore").read_text()
+    for pattern in ("/env", "/*.key", "/*.pem", "/private_terms.json", "/prices.json"):
+        assert pattern in ignored, f"{pattern} must be ignored so no build can sweep it in"
+    assert "/local_llm_mcp/prices.json" not in ignored  # the package's own table stays tracked
+
+
 def test_this_repository_history_is_clean(tmp_path):
     """Every commit and tag of THIS repository passes the shape checks.
 

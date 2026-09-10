@@ -28,6 +28,9 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 - With no denylist present the output **says the name-based checks did not run** instead of "clean".
 - `pre-commit` **refuses** when gitleaks is installed but cannot run, rather than recording a commit no
   secret scanner has read (`LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS=1` overrides once).
+- `LOCAL_LLM_MCP_DENYLIST` pointing at a file that does not exist is now an **error**, not a silent
+  degrade — a typo used to disable every name-based check while still printing a pass. Leaving the
+  variable unset still means "no list", which is how CI runs.
 - `.gitignore` now covers the instance material the README tells you to keep beside the code — the
   dotenv, key and PEM files, the private terms, a prices override, a denylist copy — root-anchored so
   the package's own `prices.json` stays tracked.

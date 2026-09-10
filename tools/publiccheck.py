@@ -106,10 +106,16 @@ def root() -> Path:
         return Path(__file__).resolve().parent.parent
 
 
+class DenylistMissing(Exception):
+    """The operator named a denylist and it is not there — a typo must not silently disable half the gate."""
+
+
 def denylist() -> list[tuple[int, re.Pattern[str]]]:
     p = os.environ.get("LOCAL_LLM_MCP_DENYLIST")
     path = Path(p) if p else Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "local-llm-mcp" / "publiccheck-denylist.txt"
     if not path.is_file():
+        if p:  # explicitly pointed at a file that is not there: refuse rather than degrade
+            raise DenylistMissing(str(path))
         return []
     terms = []
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -275,7 +281,13 @@ def main() -> int:
     g.add_argument("--all", action="store_true", help="scan every commit and every annotated tag in the repository")
     ap.add_argument("--show-values", action="store_true", help="print matched values even when stderr is not a terminal")
     a = ap.parse_args()
-    s = Scanner()
+    try:
+        s = Scanner()
+    except DenylistMissing as exc:
+        print(f"publiccheck: REFUSED — LOCAL_LLM_MCP_DENYLIST names {exc}, which does not exist. "
+              f"A mistyped path would silently disable every name-based check; fix the path, or unset the "
+              f"variable to run the shape checks alone (as CI does).", file=sys.stderr)
+        return 2
     if a.staged:
         scan_staged(s); what = "staged changes"
     elif a.message:
