@@ -147,7 +147,7 @@ _ENTROPY_RE = re.compile(r"(?<![A-Za-z0-9_/.:\-])[A-Za-z0-9_]{32,}(?![A-Za-z0-9_
 # ~10-15 ms per 100 KB against ~50 ms per 100 KB for the layers above it
 # (tools/bench_shapes.py). An UNLABELLED name has
 # no shape; those come from the terms file and the entity pass. Over-matching
-# here (a product called "Mr Cabinet", a JSON "name": "Some Thing") costs a
+# here (a product called "Mr Kettle", a JSON "name": "Some Thing") costs a
 # placeholder, never a leak, which is the fail-safe direction for PII mode.
 # Off with LOCAL_LLM_MCP_SHAPES=0.
 

@@ -82,7 +82,9 @@ def test_wrong_identity_is_refused(repo):
     (work / "c.py").write_text("y = 2\n")
     g("add", "c.py")
     r = g("commit", "-q", "-m", "add c", "--author=Someone Else <else@example.org>", check=False)
-    assert r.returncode != 0 and "author is Someone Else <else@example.org>, not the configured Test Author" in r.stderr
+    # the unexpected identity is a real name and address: withheld unless stderr is a terminal
+    assert r.returncode != 0 and "author is" in r.stderr and "not the configured Test Author" in r.stderr
+    assert "Someone Else" not in r.stderr and "withheld" in r.stderr
     r = g("-c", "user.email=other@example.org", "commit", "-q", "-m", "add c", check=False)
     assert r.returncode != 0 and ("committer is" in r.stderr or "author is" in r.stderr)
 
@@ -140,6 +142,70 @@ def test_installer_is_scoped_to_this_repository(tmp_path):
     assert not (tmp_path / "gitconfig").exists() or "hooksPath" not in (tmp_path / "gitconfig").read_text()
 
 
-def test_this_repository_history_is_clean():
-    r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, capture_output=True, text=True)
+def test_new_shapes_are_refused_and_rfc_ranges_are_not(repo):
+    """The gaps a 2026-09-09 adversarial audit found in this gate, each with a live probe."""
+    work, g = repo
+    cases = {
+        "cidr.py": ("HOST = '192.168.1.0/24'", True),          # a real subnet, not an RFC constant  # public:allow private IPv4 address
+        "rfc.py": ("CGNAT = '100.64.0.0/10'", False),           # a range constant identifies nobody
+        "doc.py": ("EX = '203.0.113.9'", False),                # RFC 5737 documentation address
+        "pub.py": ("VPS = '198.41.30.7'", True),                # a routable public address  # public:allow public IPv4 address
+        "v6.py": ("ULA = 'fd00:1234::5'", True),  # public:allow IPv6 address
+        "root.py": ("KEY = '/root/.ssh/id_rsa'", True),  # public:allow home directory path
+        "bare.py": ("P = '/home/someone'", True),               # no trailing slash  # public:allow home directory path
+        "win.py": ("P = 'C:\\\\Users\\\\someone\\\\notes'", True),
+        "uv.lock": ("url = 'http://192.168.9.9/simple'", True), # lockfiles are text and are scanned  # public:allow private IPv4 address
+        "legacy.py": ("H = '10.9.9.9'  # public:allow", False), # a bare opt-out still exempts shape checks
+        # the probe's own opt-out names the WRONG check, so the probe is still flagged; the trailing
+        # comment is on this source line only, exempting the fixture from the tree scan
+        "wrong.py": ("H = '10.9.9.9'  # public:allow tailnet hostname", True),  # public:allow private IPv4 address
+    }
+    for name, (body, _) in cases.items():
+        (work / name).write_text(body + "\n")
+    g("add", "-A")
+    r = g("commit", "-q", "-m", "probes", check=False)
+    assert r.returncode != 0
+    for name, (_, should_flag) in cases.items():
+        assert (name in r.stderr) == should_flag, f"{name}: expected flagged={should_flag}\n{r.stderr}"
+
+
+def test_a_denylist_term_can_never_be_opted_out(repo):
+    work, g = repo
+    (work / "n.md").write_text("deployed on host-zebra  # public:allow denylist term\n")
+    g("add", "n.md")
+    r = g("commit", "-q", "-m", "notes", check=False)
+    assert r.returncode != 0 and "denylist term #3" in r.stderr
+
+
+def test_a_refusal_withholds_the_value_when_output_is_not_a_terminal(repo):
+    work, g = repo
+    (work / "c.py").write_text("H = '192.168.4.20'\n")  # public:allow private IPv4 address
+    g("add", "c.py")
+    r = g("commit", "-q", "-m", "wire", check=False)
+    assert r.returncode != 0 and "192.168.4.20" not in r.stderr and "withheld" in r.stderr  # public:allow private IPv4 address
+
+
+def test_an_annotated_tag_message_and_tagger_are_scanned(repo):
+    work, g = repo
+    g("tag", "-a", "v9", "-m", "cut for host-zebra")
+    r = subprocess.run([sys.executable, str(CHECK), "--tag", "v9"], cwd=work,
+                       env={**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(work.parent / "deny.txt")},
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "denylist term #3" in r.stderr
+    r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=work,
+                       env={**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(work.parent / "deny.txt")},
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "annotated tag" not in r.stdout  # refused, so no clean line
+
+
+def test_this_repository_history_is_clean(tmp_path):
+    """Every commit and tag of THIS repository passes the shape checks.
+
+    The denylist is deliberately pinned to an absent file: it lives outside the repository and differs
+    per operator, so including it here would make this test pass on CI and fail on a machine whose list
+    happens to be wider. The denylist proof is the hooks' job, on the machine that authors the commit.
+    """
+    env = {**os.environ, "LOCAL_LLM_MCP_DENYLIST": str(tmp_path / "no-denylist.txt")}
+    r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+    assert "NO DENYLIST was found" in r.stdout  # and it says so, rather than reporting "clean"

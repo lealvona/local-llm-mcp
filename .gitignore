@@ -2,3 +2,14 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Never commit a deployment's own material, even if someone keeps it beside the code.
+# Root-anchored so the package's own local_llm_mcp/prices.json stays tracked.
+/env
+/.env
+/*.key
+/*.pem
+/*.token
+/private_terms.json
+/prices.json
+/publiccheck-denylist.txt

@@ -2,6 +2,36 @@
 
 All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
+## Unreleased
+
+### Fixed
+- A code comment in the identity-shape layer used a real machine name from the author's own network as
+  its example of a benign over-match. Replaced with an invented one. An adversarial audit found it; the
+  gate did not, because a name has no shape a regex can see — which is what the hardening below is for.
+
+### The publication gate, hardened
+- **A refusal no longer prints what it caught** unless stderr is a terminal (or `--show-values`). CI
+  logs are world-readable on a public repository, so a failing check could previously publish the very
+  value it refused.
+- **Lockfiles and every other text file are scanned.** Only binary formats are skipped.
+- **Annotated tags are scanned** — message and tagger — by `pre-push` and by `--all`; `git rev-list`
+  never shows either.
+- New checks: **public IPv4** addresses (loopback, link-local, multicast and the RFC 5737 documentation
+  ranges excluded) and **IPv6 unique-local / link-local**. Home paths now also match the root account's
+  home, `/Users/…`, Windows `C:\Users\…` (single- or double-backslashed), and a path with no trailing
+  slash.
+- A **real subnet** such as a `/24` is now refused; RFC range constants are allowed by value, so
+  documentation and code may still name them without an opt-out.
+- `public:allow` may **name the check** it exempts; a bare one still exempts the shape checks, and
+  **neither form can ever exempt a denylist term**.
+- A denylist term containing a space also matches the underscore and hyphen forms.
+- With no denylist present the output **says the name-based checks did not run** instead of "clean".
+- `pre-commit` **refuses** when gitleaks is installed but cannot run, rather than recording a commit no
+  secret scanner has read (`LOCAL_LLM_MCP_ALLOW_NO_GITLEAKS=1` overrides once).
+- `.gitignore` now covers the instance material the README tells you to keep beside the code — the
+  dotenv, key and PEM files, the private terms, a prices override, a denylist copy — root-anchored so
+  the package's own `prices.json` stays tracked.
+
 ## 0.1.0 — 2026-09-09
 
 First tagged release. Everything below is in it.

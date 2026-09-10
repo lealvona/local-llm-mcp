@@ -647,12 +647,17 @@ points a clone at the tracked hooks in `tools/githooks/`, and every one of them 
 
 The **denylist** is a private file the repository never sees — one term per line in
 `$LOCAL_LLM_MCP_DENYLIST` (default `~/.config/local-llm-mcp/publiccheck-denylist.txt`):
-your user name, host names, model aliases, domains, anything that identifies you or your
-network. Terms match case-insensitively on word boundaries and are reported by line
-number, never by value, so a refusal can be pasted anywhere. CI runs the tree check and
-`--all` over the whole history on every push; `python tools/publiccheck.py --all` is the
-same proof locally. A tree line may opt out with `public:allow` when it names an address
-range on purpose; messages, file names and identities cannot.
+your user name, host names, project names, model aliases, domains, anything that identifies you or
+your network. Terms match case-insensitively on word boundaries, and a space in a term matches a
+space, underscore or hyphen, so one entry covers `Blue Kettle`, `Blue-Kettle` and `blue_kettle`.
+Hits are reported by line number, never by value, so a refusal can be pasted anywhere.
+
+⚠️ **Keep it current: the shape checks catch addresses, but only the denylist catches NAMES.** A host
+or project name has no shape a regex can find, so a name that is not on your list will pass every
+gate — this is the one place the gate depends on you. When `publiccheck` runs without the list — on
+CI, where the file does not exist — it says so instead of reporting "clean", because half the gate
+did not run there. `python tools/publiccheck.py --all` on a machine that has the list is the real
+proof, and it reads annotated tags as well as commits.
 
 ## State on disk
 
