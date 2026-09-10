@@ -1,6 +1,7 @@
 """The delegation pipeline with the worker stubbed: verbatim quoting, and the digest fallback when nothing matches."""
 import asyncio
 import json
+import os
 
 from local_llm_mcp.config import Config
 from local_llm_mcp.llm import Usage
@@ -10,6 +11,10 @@ from local_llm_mcp.server import App
 def make_app(monkeypatch, tmp_path) -> App:
     for k in ("FALLBACK_BASE_URL", "API_KEY", "API_KEY_FILE", "RULES", "OBSERVER"):
         monkeypatch.delenv("LOCAL_LLM_MCP_" + k, raising=False)
+    # The default, unless a test set one before calling us.
+    monkeypatch.setenv("LOCAL_LLM_MCP_RUN_POLICY", os.environ.get("LOCAL_LLM_MCP_RUN_POLICY", "ask"))
+    # Never let a test append to the operator's own allow list.
+    monkeypatch.setenv("LOCAL_LLM_MCP_RUN_ALLOW", str(tmp_path / "run-allow.txt"))
     monkeypatch.setenv("LOCAL_LLM_MCP_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCAL_LLM_MCP_SOCK_DIR", str(tmp_path / "sock"))
     monkeypatch.setenv("LOCAL_LLM_MCP_PRICES", str(tmp_path / "prices.json"))

@@ -30,6 +30,7 @@ from .control import socket_path, start as start_control
 from .llm import LLMError, LocalLLM
 from .material import cap, read_paths, run_command
 from .observers import load_observer
+from . import policy as cp
 from .scrub import TIERS, Policy, ScrubResult, Scrubber
 from .session import Session
 from . import verbatim as vb
@@ -46,6 +47,7 @@ class App:
         self.observer = load_observer(cfg)
         self.prices = sv.Prices(cfg.prices_path, cfg.caller_model)
         self.ledger = sv.Ledger(cfg.state_dir / "savings.jsonl")
+        self.allow = cp.AllowList(cfg.run_allow_path)
         self.pending: dict[asyncio.Task, tuple[str, dict]] = {}  # token measurements in flight
         self.lock = asyncio.Lock()
         self.compacting: asyncio.Task | None = None
@@ -123,6 +125,62 @@ class App:
         self.observer.event("session", "armed", {"state": "on", "source": "dialog", "mode": self.mode, "session": self.session.key})
         return True, (f"[local-llm-mcp] The user turned this server on for this session (mode {self.mode.upper()}). "
                       "Operating rules:\n" + prompts.client_instructions(self.mode, self.cfg.model, self.cfg.base_url))
+
+    async def approve_command(self, ctx: Context | None, command: str, cwd: str = "") -> tuple[bool, str, str]:
+        """The command policy. Returns (may run, refusal to return instead, label for the turn).
+
+        Deny shapes first and always — no allow entry and no dialog can exempt them. Then the
+        operator's allow list. Then the user is asked, showing the exact command; a client that
+        cannot ask gets the deny check only and a trailer line saying so.
+        """
+        if self.cfg.run_policy == "off":
+            return True, "", "policy off"
+        secrets = [ph for ph, rec in self.session.vault.by_placeholder.items() if rec.get("kind") in TIERS["secrets"]]
+        d = cp.check(command, self.allow, secrets, expanded=self.inbound(command))
+        if d.verdict == "deny":
+            self.session.note_run_policy("denied", d.rule, command)
+            self.observer.event("execute_tool", "local_llm.policy",
+                                {"verdict": "denied", "rule": d.rule, "session": self.session.key})
+            return False, cp.refusal_text(d), d.label
+        if d.verdict == "allow":
+            self.session.note_run_policy("allowed", d.rule)
+            return True, "", d.label
+        if self.cfg.run_policy == "allow" or not self.client_can_ask(ctx):
+            self.session.note_run_policy("unasked")
+            return True, "", cp.NO_DIALOG_NOTE
+        if self.session.run_policy_asks() >= cp.MAX_ASKS:
+            self.session.note_run_policy("refused", "ask limit", command)
+            return False, ("[local-llm-mcp] REFUSED: this session has already asked the user about "
+                           f"{cp.MAX_ASKS} commands. Nothing was run. The user can add the shapes they want "
+                           f"to allow to {self.cfg.run_allow_path}."), "refused: ask limit"
+        shape = cp.shape_for(command)
+        action, choice = "error", ""
+        try:
+            res = await asyncio.wait_for(ctx.elicit(cp.dialog_message(command, cwd, shape), cp.RunChoice),
+                                         timeout=self.cfg.dialog_timeout)
+            action = str(res.action)
+            if action == "accept" and res.data is not None:
+                choice = str(res.data.choice or "").strip().lower()
+        except asyncio.TimeoutError:
+            action = "timeout"
+        except Exception as exc:
+            log.warning("command dialog failed: %s", exc)
+        if action != "accept" or choice not in cp.CHOICES or choice == "refuse":
+            refused = choice == "refuse"
+            self.session.note_run_policy("refused", "user" if refused else action, command)
+            self.observer.event("execute_tool", "local_llm.policy",
+                                {"verdict": "refused", "rule": "user" if refused else action, "session": self.session.key})
+            return False, (cp.user_refusal_text(command) if refused else cp.unanswered_text(action)), \
+                (f"refused: user" if refused else f"refused: {action}")
+        if choice == "always":
+            written = self.allow.add(shape)
+            self.session.note_run_policy("asked_always", shape)
+            self.observer.event("execute_tool", "local_llm.policy",
+                                {"verdict": "always", "rule": shape, "session": self.session.key})
+            return True, "", f"asked:always ({shape})" if written else f"asked:run (could not write {self.cfg.run_allow_path})"
+        self.session.note_run_policy("asked_once")
+        self.observer.event("execute_tool", "local_llm.policy", {"verdict": "once", "session": self.session.key})
+        return True, "", "asked:run"
 
     def note_client(self, ctx: Context | None) -> None:
         """Remember which MCP client this session belongs to (name, version, whether it can show a dialog)."""
@@ -390,6 +448,7 @@ class App:
             trailer = self._trailer([
                 mode, f"turn {tid}", f"ref {ref}" if ref else "",
                 f"rc {extra['rc']}" if "rc" in extra else "",
+                f"policy: {extra['policy']}" if extra.get("policy") else "",
                 f"raw {len(material)} chars" + (" (truncated)" if extra.get("truncated") else "") if material else "no material",
                 f"{usage.chunks} chunks" if usage and usage.chunks > 1 else "",
                 "finalized" if finalized else "",
@@ -615,8 +674,11 @@ def build(cfg: Config) -> FastMCP:
             "exit code, raw size); the raw output is stored as an artifact you can slice with local_llm_artifact. "
             "Use this instead of your own shell tool whenever the command would print more than you need to read "
             "(logs, tests, builds, listings, git output, grep results); rule of thumb: anything over ~40 lines / 2 KB "
-            "of output belongs here, while commands that print little or nothing run directly. Placeholders such as "
-            "[SECRET-1] in the command are expanded server-side before execution and never appear in the result."),
+            "of output belongs here, while commands that print little or nothing run directly. Placeholders in the "
+            "command are expanded server-side before execution and never appear in the result — except a secret, "
+            "which is never handed to a shell. The server holds its own command policy: destructive shapes are "
+            "refused outright, and anything outside the user's allow list is put to the user in a dialog, so a "
+            "refusal here is the user's or the server's answer and not something to work around."),
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
     )
     async def local_llm_run(
@@ -632,6 +694,9 @@ def build(cfg: Config) -> FastMCP:
         on, note = await a.ensure_armed(ctx, "local_llm_run")
         if not on:
             return note
+        may, refusal, plabel = await a.approve_command(ctx, command, cwd)
+        if not may:
+            return (note + "\n\n" + refusal) if note else refusal
         res = await run_command(a.inbound(command), cwd=cwd or None,
                                 timeout=float(timeout_s or cfg.command_timeout), max_chars=cfg.material_max_chars)
         task_text = task.strip() or prompts.DEFAULT_RUN_TASK
@@ -645,7 +710,8 @@ def build(cfg: Config) -> FastMCP:
         result = await a.delegate(kind="run", task=task_text, material=material, source=f"command: {command[:200]}",
                                   max_output_chars=_budget(max_output_chars), verbatim=verbatim,
                                   extra={"rc": res.rc, "timed_out": res.timed_out, "truncated": res.truncated,
-                                         "cmd_secs": res.secs, "gathered_chars": len(res.output)}, ctx=ctx)
+                                         "cmd_secs": res.secs, "gathered_chars": len(res.output),
+                                         "policy": plabel}, ctx=ctx)
         return (note + "\n\n" + result) if note else result
 
     @mcp.tool(
@@ -668,7 +734,7 @@ def build(cfg: Config) -> FastMCP:
         task: Annotated[str, Field(min_length=1, description="What to do, precisely: what to extract, what to report, thresholds, output shape.")],
         material: Annotated[str, Field(description="Inline text to work on (pasted output, a document, data). Optional.")] = "",
         paths: Annotated[list[str], Field(description="Files or directories to read as material (~ expands). Optional.")] = [],
-        command: Annotated[str, Field(description="Shell command whose output is added to the material (bash -c; placeholders expanded server-side). Optional.")] = "",
+        command: Annotated[str, Field(description="Shell command whose output is added to the material (bash -c; placeholders expanded server-side, secrets never). Subject to the same command policy as local_llm_run. Optional.")] = "",
         cwd: Annotated[str, Field(description="Base directory for relative paths and the command.")] = "",
         max_output_chars: Annotated[int, Field(ge=0, le=20000, description="Soft budget for the answer (0 = server default).")] = 0,
         verbatim: Annotated[bool, Field(description="Copy the matching lines byte for byte instead of answering (the worker only locates them). Only for text you must reproduce or edit (a function, a config block, an error with its stack). NOT for questions, counts, summaries or listings: those need the digest, which is the default.")] = False,
@@ -678,6 +744,12 @@ def build(cfg: Config) -> FastMCP:
         on, note = await a.ensure_armed(ctx, "local_llm_delegate")
         if not on:
             return note
+        if command:
+            # The same shell, so the same policy: a command reaching the worker through
+            # delegate is not a way around the check local_llm_run makes.
+            may, refusal, plabel = await a.approve_command(ctx, command, cwd)
+            if not may:
+                return (note + "\n\n" + refusal) if note else refusal
         pieces: list[str] = []
         sources: list[str] = []
         extra: dict = {}
@@ -694,7 +766,7 @@ def build(cfg: Config) -> FastMCP:
             sources.append(f"command: {command[:120]}")
             gathered += len(res.output or "")
             gathered_parts.append(res.output or "")
-            extra.update({"rc": res.rc, "timed_out": res.timed_out, "cmd_secs": res.secs})
+            extra.update({"rc": res.rc, "timed_out": res.timed_out, "cmd_secs": res.secs, "policy": plabel})
         if paths:
             expanded = [a.inbound(p) for p in paths]
             single = Path(os.path.expanduser(expanded[0])) if len(expanded) == 1 else None
@@ -785,6 +857,13 @@ def build(cfg: Config) -> FastMCP:
                        "note": ("standing approval LOCAL_LLM_MCP_ARM=on" if cfg.arm == "on" else
                                 {"on": "turned on for this session", "off": "off for this session"}.get(armed_rec.get("state"),
                                  "off — nothing runs until the user turns it on (dialog, LOCAL_LLM_MCP_ARM=on, or the admin app)"))}
+        a.allow.load()
+        st["run_policy"] = {**st.get("run_policy", {}), "policy": cfg.run_policy,
+                            "allow_file": str(cfg.run_allow_path), "allow_entries": list(a.allow.entries),
+                            "client_can_ask": App.client_can_ask(ctx),
+                            "note": {"ask": "commands outside the allow list are put to the user in a dialog",
+                                     "allow": "deny shapes only; nothing else is asked about",
+                                     "off": "no command policy — every command runs"}[cfg.run_policy]}
         st["disclosure"] = {**a.session.disclosure.to_meta(), "escalation": cfg.escalation,
                             "open_kinds": sorted(a.policy().open), "client_can_ask": App.client_can_ask(ctx)}
         st["summary"] = a.outbound(a.session.summary()).text

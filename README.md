@@ -31,6 +31,7 @@ package.
 
 - [How it works](#how-it-works)
 - [Turning it on — nothing happens without the user's say-so](#turning-it-on--nothing-happens-without-the-users-say-so)
+- [The command policy — what may actually run](#the-command-policy--what-may-actually-run)
 - [The two modes and when the caller calls](#the-two-modes-and-when-the-caller-calls)
 - [Tools](#tools)
 - [The privacy boundary](#the-privacy-boundary)
@@ -104,6 +105,54 @@ off. Only then does anything run; the result of that first call carries the full
   field is required, has no default, and lists **off** first, so a client that auto-accepts a
   form (empty, with defaults, or with its first option) yields "not answered" or "off" — never
   "on". Only an explicit **on** or **on_pii** chosen by the user arms the server.
+
+## The command policy — what may actually run
+
+Turning the server on is one decision; what it then executes is another. Every command a caller
+hands to `local_llm_run` (or to `local_llm_delegate`'s `command`) runs with **your** privileges,
+and a client in a bypass or auto permission mode never shows you a per-tool prompt — so the
+server holds its own line, in three layers:
+
+1. **Deny shapes** — refused outright, nothing run, the reason returned to the caller:
+   privilege escalation (`sudo`, `doas`, `su`, `pkexec`), power state (`shutdown`, `reboot`,
+   `halt`), filesystem writes (`mkfs*`, `fdisk`, `parted`, `wipefs`, `dd of=`), recursive `rm`,
+   recursive `chmod`/`chown`, package installs, `shred`, a pipe from `curl`/`wget` into a shell,
+   a write to a real device under `/dev/`, and any write under **`/etc`, `/boot` or `~/.ssh`**
+   (reading them is fine). A command containing a placeholder that would rehydrate to a
+   **secret** is refused too — a secret is never handed to a shell.
+2. **Your allow list** — one glob per line in `~/.config/local-llm-mcp/run-allow.txt`
+   (`LOCAL_LLM_MCP_RUN_ALLOW`). These run without a question: the standing approval for the
+   shapes you delegate every day.
+
+   ```
+   git log*
+   journalctl*
+   ls*
+   rg*
+   pytest*
+   ```
+
+   **Every segment of a command line must match an entry**, so approving `ls*` does not approve
+   `ls; something-else`. Approving `git log*` does not approve `git push*`: for a multiplexer
+   (git, docker, systemctl, uv, npm…) the subcommand is part of the shape.
+3. **Everything else asks.** The same MCP elicitation the gate uses, showing you the exact
+   command and its working directory: **refuse / run once / always allow this shape**. "Always"
+   appends the shape to the allow file, so the file stays the record of what you approved and
+   you can edit it by hand. Like the turn-on dialog it lists **refuse** first and has no
+   default, so a client that auto-accepts a form can never approve a command.
+
+**No allow entry, and no dialog answer, can exempt a deny shape** — layer 1 is checked first,
+always. A client that cannot show a dialog gets layer 1 and a trailer line saying it was not
+asked. Every decision is stamped on the turn and in the trailer (`policy: allow-list (ls*)`,
+`policy: asked:run`, `policy: refused: recursive rm`), counted in `local_llm_status.run_policy`,
+and shown as a chip on the session's row in the admin app.
+
+`LOCAL_LLM_MCP_RUN_POLICY` chooses how much of this runs: `ask` (default), `allow` (layer 1
+only — never ask), or `off` (no policy at all).
+
+This is deliberately **not a sandbox**. It reads command position, quoting and redirection well
+enough to judge shapes; it does not follow a script it invokes, a variable it expands, or an
+alias. It is a second lock on a door you already opened.
 
 ## The two modes and when the caller calls
 
@@ -482,6 +531,8 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_SUMMARY_CHARS` | `6000` | compaction target |
 | `LOCAL_LLM_MCP_AUTO_COMPACT_CHARS` | `60000` | self-compaction threshold on uncompacted turns |
 | `LOCAL_LLM_MCP_COMMAND_TIMEOUT` | `120` | default command timeout, seconds |
+| `LOCAL_LLM_MCP_RUN_POLICY` | `ask` | the command policy: `ask` (deny shapes, then the allow list, then ask the user), `allow` (deny shapes only), `off` (no policy) |
+| `LOCAL_LLM_MCP_RUN_ALLOW` | `~/.config/local-llm-mcp/run-allow.txt` | commands that run without asking, one glob per line; the "always" answer appends here |
 | `LOCAL_LLM_MCP_STRICT_PII` | `0` | treat every bare 10-digit run as a phone number (default: only formatted numbers or ones near phone words) |
 | `LOCAL_LLM_MCP_ENTITY_PASS` | `1` | PII mode: ask the worker for the private values before answering |
 | `LOCAL_LLM_MCP_ARM` | `ask` | the opt-in gate: `ask` = the user is asked in a dialog on first use (a client without one is refused); `on` = the user's standing approval for this client configuration |
@@ -703,19 +754,23 @@ a fresh PII-mode server against it, and prints the digest only if none of those 
 
 **Protects against:** private values in material (files, command output, pasted
 text) reaching the caller, including when the worker paraphrases, uppercases, or
-quotes them; secrets in commands the caller composes from placeholders; private
-values surviving into summaries and artifact slices.
+quotes them; private values surviving into summaries and artifact slices; and — through
+the command policy — a caller running a destructive command, or one built around a
+secret, on a client whose own approval prompts are turned off.
 
 **Assumes:** the host and the local model endpoint are trusted; the caller is not
 malicious toward the operator (it is instructed, not sandboxed); the operator lists
-the identities to protect or accepts the entity pass's recall.
+the identities to protect or accepts the entity pass's recall; and that what they put on
+the allow list is what they meant to approve.
 
 **Does not protect against:** a caller that reads private files with its *own* tools
 instead of delegating (the instructions say not to; nothing enforces it — put a hook in
 front of those tools if you need enforcement); names and addresses that are neither in
 the terms file nor recognised by the worker; secrets shaped like ordinary words with no
 label; side channels such as the *length* of a rehydrated value (a command can measure
-it); the worker's own logs at the endpoint.
+it); the worker's own logs at the endpoint. **The command policy is not a sandbox** — it
+judges shapes, not shell semantics, so it does not follow a script it invokes, a variable
+it expands, or an alias; a command the user approves runs as the user.
 
 **Known behaviours:** bare ten-digit numbers in command output are ids unless
 formatted or near a phone word (`LOCAL_LLM_MCP_STRICT_PII=1` flips that); in PII mode,

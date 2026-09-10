@@ -225,6 +225,27 @@ class Session:
         rec = self.meta.get("leak_check") if isinstance(self.meta.get("leak_check"), dict) else {}
         return {"ran": int(rec.get("ran") or 0), "failed": int(rec.get("failed") or 0), "last_failure": rec.get("last_failure")}
 
+    def note_run_policy(self, verdict: str, rule: str = "", command: str = "") -> None:
+        """Count every command-policy decision, so status and the admin app show how much is
+        running on the operator's standing approval and what has been refused. A refusal keeps
+        the shape and the command (this vault is local and 0600); an approval keeps counts only."""
+        rec = dict(self.meta.get("run_policy") or {}) if isinstance(self.meta.get("run_policy"), dict) else {}
+        rec[verdict] = int(rec.get(verdict) or 0) + 1
+        if verdict in ("denied", "refused"):
+            rec["last_refusal"] = {"ts": _now_iso(), "rule": rule, "command": command[:300]}
+        self.meta["run_policy"] = rec
+        self._save_meta()
+
+    def run_policy(self) -> dict:
+        rec = self.meta.get("run_policy") if isinstance(self.meta.get("run_policy"), dict) else {}
+        out = {k: int(rec.get(k) or 0) for k in ("allowed", "asked_once", "asked_always", "refused", "denied", "unasked")}
+        out["last_refusal"] = rec.get("last_refusal")
+        return out
+
+    def run_policy_asks(self) -> int:
+        rec = self.meta.get("run_policy") if isinstance(self.meta.get("run_policy"), dict) else {}
+        return sum(int(rec.get(k) or 0) for k in ("asked_once", "asked_always", "refused"))
+
     def bump_armed_asks(self) -> int:
         rec = dict(self.meta.get("armed") or {}) if isinstance(self.meta.get("armed"), dict) else {}
         rec["asked"] = int(rec.get("asked") or 0) + 1
@@ -434,6 +455,7 @@ class Session:
             "compactions": int(self.meta.get("compactions", 0)),
             "last_compaction": self.meta.get("last_compaction"),
             "leak_check": self.leak_check(),
+            "run_policy": self.run_policy(),
             "placeholders": self.vault.counts(),
             "artifacts": self.artifact_count(),
             "created": self.meta.get("created"),

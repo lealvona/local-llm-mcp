@@ -169,6 +169,7 @@ class AdminState:
                 "client": (meta.get("client") or {}).get("name", "") if isinstance(meta.get("client"), dict) else "",
                 "armed": meta.get("armed") if isinstance(meta.get("armed"), dict) else {},
                 "leak_check": meta.get("leak_check") if isinstance(meta.get("leak_check"), dict) else {},
+                "run_policy": meta.get("run_policy") if isinstance(meta.get("run_policy"), dict) else {},
                 "placeholders": vault.counts(), "placeholder_total": len(vault.by_placeholder),
                 "artifacts": len(list((d / "artifacts").glob("a_*.txt"))) if (d / "artifacts").is_dir() else 0,
                 "bytes": _dir_size(d), "summary_chars": (d / "summary.md").stat().st_size if (d / "summary.md").is_file() else 0,

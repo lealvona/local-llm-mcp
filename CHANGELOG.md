@@ -4,6 +4,37 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### The command policy
+
+The opt-in gate decides whether the server works at all; this decides what it executes. Every command
+a caller hands to `local_llm_run` — or to `local_llm_delegate`'s `command`, the same shell — runs with
+the user's privileges, and a client in a bypass or auto permission mode never shows a per-tool prompt.
+The server now holds its own line, in three layers.
+
+- **Deny shapes** are refused outright, nothing run, the reason returned: privilege escalation, power
+  state, filesystem and device writes, `dd of=`, recursive `rm`/`chmod`/`chown`, package installs,
+  `shred`, a pipe from `curl`/`wget` into a shell, and any write under `/etc`, `/boot` or `~/.ssh`
+  (reading them is untouched). Deny shapes are judged per command-line segment, so a quoted mention
+  in an argument is not a match and a second command after a `;` is not hidden by the first.
+- **A secret is never handed to a shell.** A command containing a placeholder that would rehydrate to
+  a `[SECRET-n]` is refused. This *removes* a previously advertised behaviour — such placeholders used
+  to be expanded server-side — because a command is not a boundary the server can hold.
+- **An allow list** the user owns: one glob per line in `~/.config/local-llm-mcp/run-allow.txt`
+  (`LOCAL_LLM_MCP_RUN_ALLOW`). Every segment of a command must match an entry, and for a multiplexer
+  the subcommand is part of the shape — `git log*` is not `git push*`.
+- **Everything else asks**, through the same MCP elicitation as the gate, showing the exact command and
+  its working directory: refuse / run once / always allow this shape. "Always" appends the shape to the
+  file. The dialog lists **refuse** first and has no default, so a client that auto-accepts a form can
+  never approve a command. No allow entry and no dialog answer can exempt a deny shape.
+- A client that cannot show a dialog gets the deny shapes and a trailer line saying it was not asked.
+  `LOCAL_LLM_MCP_RUN_POLICY=ask|allow|off` chooses how much of this runs; a session stops asking after
+  12 dialogs.
+- Every decision is stamped on the turn and in the trailer (`policy: allow-list (ls*)`), counted in
+  `local_llm_status.run_policy`, and shown as a chip on the session's row in the admin app.
+
+It is deliberately not a sandbox: it reads command position, quoting and redirection well enough to
+judge shapes, and does not follow a script it invokes, a variable it expands, or an alias.
+
 ### Fixed
 - A code comment in the identity-shape layer used a real machine name from the author's own network as
   its example of a benign over-match. Replaced with an invented one. An adversarial audit found it; the
