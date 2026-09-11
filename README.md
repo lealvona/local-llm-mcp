@@ -468,7 +468,7 @@ hooks, listed after the table.
 | Client | Register | Verified |
 |---|---|---|
 | **Claude Code** | `claude mcp add --scope user local-llm -- /path/to/venv/bin/local-llm-mcp` + the two hooks (see above) | full: hooks, dialog, compaction trigger |
-| **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | agent turn: Codex called `local_llm_status` and printed the JSON. It **does** declare elicitation, so the dialogs work |
+| **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | agent turn: tools called and digested; it **does** declare elicitation. Note the non-interactive caveat below |
 | **Hermes Agent** | in `config.yaml`: `mcp_servers:\n  local-llm:\n    command: /path/to/venv/bin/local-llm-mcp` | agent turn: Hermes called `local_llm_run` and returned the digest with the server's trailer |
 | **Kimi Code CLI** | `~/.kimi/mcp.json`: `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp", "args": []}}}` | see below |
 | **opencode** | `opencode.json(c)`: `{"mcp": {"local-llm": {"type": "local", "command": ["/path/to/venv/bin/local-llm-mcp"], "enabled": true}}}` | see below |
@@ -496,6 +496,13 @@ What you lose without Claude Code's hooks, and what replaces it:
   **resource** (`local-llm://instructions`), and the routing rules are written into the tool
   descriptions, which every client shows. For a harness that reads an instructions file
   (`AGENTS.md`, a system prompt), paste the ASSIST or PII text from `local_llm_status`.
+- **A non-interactive run cannot answer a dialog.** A client may declare elicitation and still
+  auto-**decline** every question when it has no user in front of it — `codex exec` does, and so
+  does Claude Code's print mode. That is the right direction to fail: the gate stays off and no
+  command runs. For an unattended run, give that client its standing approvals explicitly in its
+  own server config — `LOCAL_LLM_MCP_ARM=on`, plus the command shapes in `LOCAL_LLM_MCP_RUN_ALLOW`
+  (or `LOCAL_LLM_MCP_RUN_POLICY=allow`). Both are needed: they are separate decisions, and each
+  dialog is refused on its own.
 - **The turn-on and disclosure dialogs** need a client that supports MCP elicitation (Claude Code
   does). Without it, the server refuses to start until the user sets `LOCAL_LLM_MCP_ARM=on` in that
   client's server configuration (their explicit approval), and disclosure falls back to `auto`:
