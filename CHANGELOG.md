@@ -35,6 +35,11 @@ The server now holds its own line, in three layers.
 It is deliberately not a sandbox: it reads command position, quoting and redirection well enough to
 judge shapes, and does not follow a script it invokes, a variable it expands, or an alias.
 
+### Decided
+- **PyPI is not a target.** Publishing a package is a support commitment the author is not taking;
+  the install path is git. `ROADMAP.md` is gone with it — both items it held are settled, one built
+  and one declined.
+
 ### Fixed
 - A code comment in the identity-shape layer used a real machine name from the author's own network as
   its example of a benign over-match. Replaced with an invented one. An adversarial audit found it; the

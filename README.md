@@ -829,6 +829,11 @@ address the check passes, but you would be defeating the purpose. Don't.
 are Claude Code specific; without them, sessions are keyed by parent pid and compaction
 is by size or on demand.
 
+**Why isn't it on PyPI?** Because publishing a package is a support commitment, and the
+author isn't taking one. Install it from git — the line above works, and `uv tool install
+git+https://github.com/lealvona/local-llm-mcp` does too. The repository is MIT: fork it,
+package it, publish it under your own name if you want a release you can rely on.
+
 ## License
 
 MIT — see `LICENSE`.
