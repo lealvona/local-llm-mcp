@@ -468,7 +468,7 @@ hooks, listed after the table.
 | Client | Register | Verified |
 |---|---|---|
 | **Claude Code** | `claude mcp add --scope user local-llm -- /path/to/venv/bin/local-llm-mcp` + the two hooks (see above) | full: hooks, dialog, compaction trigger |
-| **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | config accepted, `codex mcp list` shows it enabled |
+| **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | agent turn: Codex called `local_llm_status` and printed the JSON. It **does** declare elicitation, so the dialogs work |
 | **Hermes Agent** | in `config.yaml`: `mcp_servers:\n  local-llm:\n    command: /path/to/venv/bin/local-llm-mcp` | agent turn: Hermes called `local_llm_run` and returned the digest with the server's trailer |
 | **Kimi Code CLI** | `~/.kimi/mcp.json`: `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp", "args": []}}}` | see below |
 | **opencode** | `opencode.json(c)`: `{"mcp": {"local-llm": {"type": "local", "command": ["/path/to/venv/bin/local-llm-mcp"], "enabled": true}}}` | see below |
@@ -483,7 +483,10 @@ What you lose without Claude Code's hooks, and what replaces it:
 
 - **Session identity.** Claude Code's SessionStart hook maps the conversation id onto the server;
   elsewhere the session is keyed by the client process that spawned the server (`pid-<pid>`),
-  one per conversation, or by `LOCAL_LLM_MCP_SESSION` if the client sets it. The session records
+  one per conversation, or by `LOCAL_LLM_MCP_SESSION` if the client sets it. The pidmap is read
+  **only** when Claude Code is the process that spawned the server, so another harness launched
+  from inside a Claude Code session gets its own session rather than inheriting that
+  conversation's vault, memory and answer to the gate. The session records
   which client it belongs to (`client` in `local_llm_status` and the admin sessions table).
 - **Compaction trigger.** The PreCompact hook tells the worker to compact when the caller does;
   without it the worker still compacts itself at `LOCAL_LLM_MCP_AUTO_COMPACT_CHARS` and on

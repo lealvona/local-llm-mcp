@@ -35,6 +35,17 @@ The server now holds its own line, in three layers.
 It is deliberately not a sandbox: it reads command position, quoting and redirection well enough to
 judge shapes, and does not follow a script it invokes, a variable it expands, or an alias.
 
+### Fixed — one client's approval could arm another
+
+A server spawned by a **different** agent harness that had itself been launched from inside a Claude
+Code session adopted that session's id: its vault, its memory, and its answer to the opt-in gate.
+Found by running the Codex CLI against this server for the first time — it landed in the Claude Code
+conversation that started it.
+
+The session is now keyed by the **nearest real ancestor**, and Claude Code's pidmap is consulted only
+when Claude Code is the process that spawned the server. Another harness gets its own pid-keyed
+session and is asked the turn-on question for itself, which is the whole point of the gate.
+
 ### Decided
 - **PyPI is not a target.** Publishing a package is a support commitment the author is not taking;
   the install path is git. `ROADMAP.md` is gone with it — both items it held are settled, one built

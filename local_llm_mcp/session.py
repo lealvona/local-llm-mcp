@@ -85,18 +85,27 @@ def is_claude_process(comm: str, cmdline: str) -> bool:
     return False
 
 
-def find_claude_pid(start: int | None = None) -> int:
-    """Nearest ancestor that is the Claude Code process (skipping shells and ourselves)."""
-    chain = ancestors(start)
-    for pid, comm, cmd in chain:
-        if any(m in cmd.lower() for m in SELF_MARKERS) or comm in SHELLS:
+def spawning_client(start: int | None = None) -> tuple[int, bool]:
+    """(pid of the client that spawned this server, is it Claude Code).
+
+    The NEAREST real ancestor, skipping shells and our own wrappers — not the nearest Claude
+    ancestor. The difference is load-bearing: another agent harness (Codex, kimi, opencode) may
+    itself have been launched from inside a Claude Code session, and it is a different
+    conversation with a different user-facing dialog. Keying it by the Claude process further up
+    the tree would hand it that conversation's vault, memory AND its answer to the opt-in gate —
+    one client's approval silently arming another. Measured 2026-09-10: a Codex run launched from
+    a Claude Code session adopted that session's id.
+    """
+    for pid, comm, cmd in ancestors(start):
+        if comm in SHELLS or any(m in cmd.lower() for m in SELF_MARKERS):
             continue
-        if is_claude_process(comm, cmd):
-            return pid
-    for pid, comm, cmd in chain:
-        if comm not in SHELLS and not any(m in cmd.lower() for m in SELF_MARKERS):
-            return pid
-    return os.getppid()
+        return pid, is_claude_process(comm, cmd)
+    return os.getppid(), False
+
+
+def find_claude_pid(start: int | None = None) -> int:
+    """The pid this session is keyed by: the spawning client, whatever it is."""
+    return spawning_client(start)[0]
 
 
 def read_pidmap(state_dir: Path, pid: int) -> dict | None:
@@ -130,18 +139,22 @@ class Session:
         self.cfg = cfg
         self.state_dir = cfg.state_dir
         (self.state_dir / "sessions").mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.claude_pid = find_claude_pid()
+        self.claude_pid, self.under_claude = spawning_client()
         self.claude_session_id = ""
         if cfg.session_override:
             self.key = cfg.session_override
         else:
             self.key = f"pid-{self.claude_pid}"
-            for pid, _comm, _cmd in ancestors():
-                rec = read_pidmap(self.state_dir, pid)
-                if rec and rec.get("session_id"):
-                    self.key = rec["session_id"]
-                    self.claude_session_id = rec["session_id"]
-                    break
+            # The pidmap is Claude Code's own hook telling us which conversation this is. Only
+            # consult it when Claude Code is the client that spawned us; another harness gets its
+            # own pid-keyed session even though a Claude process sits further up its tree.
+            if self.under_claude:
+                for pid, _comm, _cmd in ancestors():
+                    rec = read_pidmap(self.state_dir, pid)
+                    if rec and rec.get("session_id"):
+                        self.key = rec["session_id"]
+                        self.claude_session_id = rec["session_id"]
+                        break
         self.dir = self.state_dir / "sessions" / self.key
         self._open_dir()
 
@@ -274,7 +287,7 @@ class Session:
         """Late pidmap lookup. The SessionStart hook can fire before this server has
         opened its socket (measured: it did, on the first real resume), so a
         pid-keyed session re-checks the map on every tool call until it is named."""
-        if not self.key.startswith("pid-") or self.cfg.session_override:
+        if not self.key.startswith("pid-") or self.cfg.session_override or not self.under_claude:
             return False
         for pid, _comm, _cmd in ancestors():
             rec = read_pidmap(self.state_dir, pid)
