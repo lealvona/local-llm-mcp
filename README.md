@@ -470,7 +470,7 @@ hooks, listed after the table.
 | **Claude Code** | `claude mcp add --scope user local-llm -- /path/to/venv/bin/local-llm-mcp` + the two hooks (see above) | full: hooks, dialog, compaction trigger |
 | **Codex CLI** | `codex mcp add local-llm -- /path/to/venv/bin/local-llm-mcp` (writes `[mcp_servers.local-llm]` in `~/.codex/config.toml`) | agent turn: tools called and digested; it **does** declare elicitation. Note the non-interactive caveat below |
 | **Hermes Agent** | in `config.yaml`: `mcp_servers:\n  local-llm:\n    command: /path/to/venv/bin/local-llm-mcp` | agent turn: Hermes called `local_llm_run` and returned the digest with the server's trailer |
-| **Kimi Code CLI** | `~/.kimi/mcp.json`: `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp", "args": []}}}` | see below |
+| **Kimi Code CLI** | `~/.kimi-code/mcp.json`: `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp", "args": []}}}` — ⚠️ **not `~/.kimi/`**, which 0.37 no longer reads | agent turn: `local_llm_run` called, digest and trailer returned. **Declares no elicitation**, so it needs the standing approvals below |
 | **opencode** | `opencode.json(c)`: `{"mcp": {"local-llm": {"type": "local", "command": ["/path/to/venv/bin/local-llm-mcp"], "enabled": true}}}` | see below |
 | **Claude Desktop, Cursor, Windsurf and most others** | `{"mcpServers": {"local-llm": {"command": "/path/to/venv/bin/local-llm-mcp"}}}` in the client's MCP config | same wire protocol as the Inspector run below |
 | **MCP Inspector** (reference client) | `npx @modelcontextprotocol/inspector --cli /path/to/venv/bin/local-llm-mcp --method tools/list` | `tools/list` and a `tools/call` of `local_llm_run` |
@@ -503,10 +503,15 @@ What you lose without Claude Code's hooks, and what replaces it:
   own server config — `LOCAL_LLM_MCP_ARM=on`, plus the command shapes in `LOCAL_LLM_MCP_RUN_ALLOW`
   (or `LOCAL_LLM_MCP_RUN_POLICY=allow`). Both are needed: they are separate decisions, and each
   dialog is refused on its own.
-- **The turn-on and disclosure dialogs** need a client that supports MCP elicitation (Claude Code
-  does). Without it, the server refuses to start until the user sets `LOCAL_LLM_MCP_ARM=on` in that
-  client's server configuration (their explicit approval), and disclosure falls back to `auto`:
-  masked, with a note telling the model to call `local_llm_disclosure` when the user decides.
+- **The turn-on, disclosure and command dialogs** need a client that supports MCP elicitation
+  (Claude Code and Codex do; **Kimi Code 0.37 does not**). Without it, the server refuses to start
+  until the user sets `LOCAL_LLM_MCP_ARM=on` in that client's server configuration (their explicit
+  approval); disclosure falls back to `auto` (masked, with a note telling the model to call
+  `local_llm_disclosure` when the user decides); and the command policy falls back to its deny
+  shapes alone, with a trailer line saying the user was not asked — **so in such a client the allow
+  list is the only per-command control, and it is worth filling in.** Measured on Kimi Code 0.37:
+  refused as designed, then with `ARM=on` and one allow entry it returned the digest and the full
+  trailer, `policy: allow-list (echo*)` included.
 
 One server process serves one conversation; that is the isolation model behind the vault. Do
 not put it behind a multi-user MCP gateway (a shared mcpo instance serving a chat UI, say): every

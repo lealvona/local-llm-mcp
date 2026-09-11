@@ -46,6 +46,12 @@ The session is now keyed by the **nearest real ancestor**, and Claude Code's pid
 when Claude Code is the process that spawned the server. Another harness gets its own pid-keyed
 session and is asked the turn-on question for itself, which is the whole point of the gate.
 
+### Verified against the other agent CLIs
+- **Kimi Code CLI**: its config home is `~/.kimi-code/`, and 0.37 no longer reads `~/.kimi/` — the
+  registration this README gave was in a directory the installed client ignores, which is why it had
+  never connected. Corrected. It declares **no elicitation**, so it needs `LOCAL_LLM_MCP_ARM=on` and
+  an allow list; with those it returned the digest and the full trailer.
+
 ### Decided
 - **PyPI is not a target.** Publishing a package is a support commitment the author is not taking;
   the install path is git. `ROADMAP.md` is gone with it — both items it held are settled, one built
