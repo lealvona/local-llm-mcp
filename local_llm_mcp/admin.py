@@ -579,8 +579,14 @@ def main(argv: list[str] | None = None) -> int:
     bind = args.bind or os.environ.get(ENV_PREFIX + "ADMIN_BIND") or "127.0.0.1"
     port = args.port or int(os.environ.get(ENV_PREFIX + "ADMIN_PORT") or 8631)
     if bind not in ("127.0.0.1", "localhost", "::1") and not token:
-        log.warning("binding %s with NO token: everyone who can reach this port can read private values. "
-                    "Set %sADMIN_TOKEN or %sADMIN_TOKEN_FILE.", bind, ENV_PREFIX, ENV_PREFIX)
+        if (os.environ.get(ENV_PREFIX + "ADMIN_ALLOW_NO_TOKEN") or "").strip().lower() not in ("1", "true", "yes"):
+            print(f"refusing to bind {bind} with no token: this app shows private values (the placeholder "
+                  f"vault, session memory, artifacts) to whoever reaches the port. Set {ENV_PREFIX}ADMIN_TOKEN "
+                  f"or {ENV_PREFIX}ADMIN_TOKEN_FILE, or set {ENV_PREFIX}ADMIN_ALLOW_NO_TOKEN=1 to start anyway.",
+                  file=sys.stderr)
+            return 2
+        log.warning("binding %s with NO token (allowed by %sADMIN_ALLOW_NO_TOKEN): everyone who can reach "
+                    "this port can read private values.", bind, ENV_PREFIX)
     srv = make_server(bind, port, cfg, token)
     log.info("admin on http://%s:%d/ (state %s, terms %s, token %s)", bind, port, cfg.state_dir, cfg.private_terms_path,
              "required" if token else "none")

@@ -4,6 +4,16 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Fixed — an audit for adopters other than the maintainer
+- `local_llm_run`/`local_llm_delegate`'s command execution hardcoded `executable="/bin/bash"`. On any
+  system where bash isn't at that exact path (NixOS, some minimal containers) every command call raised
+  an unhandled `FileNotFoundError`. Now resolved via `PATH`, with a clear refusal — not a stack trace —
+  when there is none.
+- The admin app's non-loopback-bind check only logged a warning before starting anyway, so binding it
+  wider (a documented, supported use — `LOCAL_LLM_MCP_ADMIN_BIND` exists for exactly this) with the
+  token unset served the whole PII vault to anyone who found the port. It now refuses to start; set
+  `LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN=1` if that is genuinely what you want.
+
 ### The command policy
 
 The opt-in gate decides whether the server works at all; this decides what it executes. Every command

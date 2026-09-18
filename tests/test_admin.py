@@ -132,3 +132,56 @@ def test_savings_and_prices_api(server):
     code, p3 = call(server, "DELETE", "/api/prices")
     assert code == 200 and p3["reset"] and not p3["override_present"]
     assert call(server, "GET", "/api/savings", token="")[0] == 401
+
+
+# ---- a non-loopback bind with no token must not silently start (was: logged, then served) ----
+
+
+def _bare_env(tmp_path, monkeypatch):
+    """Enough env for Config.from_env() to succeed, nothing that opens a port."""
+    monkeypatch.setenv("LOCAL_LLM_MCP_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCAL_LLM_MCP_SOCK_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("LOCAL_LLM_MCP_PRICES", str(tmp_path / "prices-override.json"))
+    monkeypatch.setenv("LOCAL_LLM_MCP_PRIVATE_TERMS", str(tmp_path / "terms.json"))
+    monkeypatch.delenv("LOCAL_LLM_MCP_RULES", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_MCP_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_MCP_ADMIN_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN", raising=False)
+    # main() calls load_env_file() for real; without this it reads the machine's own
+    # deployment dotenv, which may set an ADMIN_TOKEN_FILE and silently pass the test.
+    monkeypatch.setenv("LOCAL_LLM_MCP_ENV_FILE", str(tmp_path / "no-such-env-file"))
+
+
+def test_loopback_needs_no_token(tmp_path, monkeypatch, capsys):
+    from local_llm_mcp.admin import main
+    _bare_env(tmp_path, monkeypatch)
+    assert main(["--bind", "127.0.0.1", "--backfill-savings"]) == 0  # exits before binding; proves no refusal fires
+
+
+def test_non_loopback_with_no_token_refuses_to_start(tmp_path, monkeypatch, capsys):
+    from local_llm_mcp.admin import main
+    _bare_env(tmp_path, monkeypatch)
+    rc = main(["--bind", "0.0.0.0", "--port", "0"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refusing to bind" in err and "ADMIN_ALLOW_NO_TOKEN" in err
+
+
+def test_non_loopback_with_a_token_is_fine(tmp_path, monkeypatch):
+    from local_llm_mcp.admin import make_server
+    from local_llm_mcp.config import Config
+    _bare_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_LLM_MCP_ADMIN_TOKEN", "tok")
+    cfg = Config.from_env()
+    srv = make_server("0.0.0.0", 0, cfg, "tok")
+    srv.server_close()
+
+
+def test_the_override_lets_it_start_anyway(tmp_path, monkeypatch):
+    _bare_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN", "1")
+    from local_llm_mcp.admin import make_server
+    from local_llm_mcp.config import Config
+    cfg = Config.from_env()
+    srv = make_server("0.0.0.0", 0, cfg, "")
+    srv.server_close()

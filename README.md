@@ -566,7 +566,8 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_OBSERVER_PATH` | unset | directory added to `sys.path` to import your observer |
 | `LOCAL_LLM_MCP_SESSION` | unset | force a session key (tests, scripts) |
 | `LOCAL_LLM_MCP_ADMIN_BIND` / `_ADMIN_PORT` | `127.0.0.1` / `8631` | admin app listener |
-| `LOCAL_LLM_MCP_ADMIN_TOKEN` / `_ADMIN_TOKEN_FILE` | unset | bearer token the admin API requires (set it whenever the bind is not loopback) |
+| `LOCAL_LLM_MCP_ADMIN_TOKEN` / `_ADMIN_TOKEN_FILE` | unset | bearer token the admin API requires (set it whenever the bind is not loopback — a non-loopback bind with neither this nor the override below set refuses to start) |
+| `LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN` | `0` | start anyway on a non-loopback bind with no token |
 | `LOCAL_LLM_MCP_LOG_LEVEL` | `INFO` | stderr logging |
 
 CLI: `local-llm-mcp [--mode pii|assist] [--session KEY] [--check]`.
@@ -669,7 +670,10 @@ It reads the same dotenv, state directory and terms file as the server (terms ar
 hot-reloaded, so an edit here applies to running servers at once). **It shows private
 values to whoever reaches the port**: it binds to loopback by default, and when bound
 wider it should sit behind a firewall *and* a token (`LOCAL_LLM_MCP_ADMIN_TOKEN` or
-`_TOKEN_FILE`; the page asks once per tab). No external assets; `?demo=1` renders the
+`_TOKEN_FILE`; the page asks once per tab) — a non-loopback bind with no token set
+**refuses to start** rather than serving the vault to whoever finds the port; set
+`LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN=1` if you genuinely want that (a LAN you already
+trust, say) and understand what it means. No external assets; `?demo=1` renders the
 page with sample data and no server, for a look at the UI.
 
 ## Keeping a deployment separate from the code

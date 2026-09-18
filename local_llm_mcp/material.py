@@ -4,11 +4,16 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+
+
+class ShellNotFound(RuntimeError):
+    """No bash on PATH. Distinct from a command's own failure so the caller sees why nothing ran."""
 
 
 def strip_ansi(text: str) -> str:
@@ -36,6 +41,13 @@ class CommandResult:
 
 
 async def run_command(cmd: str, *, cwd: str | None, timeout: float, max_chars: int) -> CommandResult:
+    # bash, not the platform's default /bin/sh: the command policy's deny shapes and the tool's
+    # documented contract ("bash -c") both assume it. Resolved via PATH, not hardcoded to
+    # /bin/bash — that path doesn't exist on every system (NixOS, some minimal containers), and a
+    # missing binary should be a clear refusal here, not an opaque FileNotFoundError from asyncio.
+    bash = shutil.which("bash")
+    if not bash:
+        raise ShellNotFound("no 'bash' found on PATH; local_llm_run and local_llm_delegate's command= need it")
     env = {**os.environ, "TERM": "dumb", "NO_COLOR": "1", "PAGER": "cat", "GIT_PAGER": "cat",
            "SYSTEMD_PAGER": "cat", "LESS": "-FRX", "PYTHONUNBUFFERED": "1"}
     t0 = time.monotonic()
@@ -46,7 +58,7 @@ async def run_command(cmd: str, *, cwd: str | None, timeout: float, max_chars: i
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd or None,
         env=env,
-        executable="/bin/bash",
+        executable=bash,
     )
     limit = max_chars * 4  # bytes; head+tail capping happens after decode
     buf = bytearray()

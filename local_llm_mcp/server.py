@@ -28,7 +28,7 @@ from .config import MODES, Config
 from .disclosure import CHOICES, DisclosureChoice, detected_tiers, dialog_message, found_text
 from .control import socket_path, start as start_control
 from .llm import LLMError, LocalLLM
-from .material import cap, read_paths, run_command
+from .material import ShellNotFound, cap, read_paths, run_command
 from .observers import load_observer
 from . import policy as cp
 from .scrub import TIERS, Policy, ScrubResult, Scrubber
@@ -698,8 +698,12 @@ def build(cfg: Config) -> FastMCP:
         may, refusal, plabel = await a.approve_command(ctx, command, cwd)
         if not may:
             return (note + "\n\n" + refusal) if note else refusal
-        res = await run_command(a.inbound(command), cwd=cwd or None,
-                                timeout=float(timeout_s or cfg.command_timeout), max_chars=cfg.material_max_chars)
+        try:
+            res = await run_command(a.inbound(command), cwd=cwd or None,
+                                    timeout=float(timeout_s or cfg.command_timeout), max_chars=cfg.material_max_chars)
+        except ShellNotFound as exc:
+            msg = f"[local-llm-mcp] {exc}"
+            return (note + "\n\n" + msg) if note else msg
         task_text = task.strip() or prompts.DEFAULT_RUN_TASK
         if res.timed_out:
             task_text += f" NOTE: the command was killed after {timeout_s or int(cfg.command_timeout)}s; say so."
@@ -760,8 +764,12 @@ def build(cfg: Config) -> FastMCP:
             pieces.append(material)
             sources.append(f"inline ({len(material)} chars)")
         if command:
-            res = await run_command(a.inbound(command), cwd=cwd or None, timeout=cfg.command_timeout,
-                                    max_chars=cfg.material_max_chars)
+            try:
+                res = await run_command(a.inbound(command), cwd=cwd or None, timeout=cfg.command_timeout,
+                                        max_chars=cfg.material_max_chars)
+            except ShellNotFound as exc:
+                msg = f"[local-llm-mcp] {exc}"
+                return (note + "\n\n" + msg) if note else msg
             pieces.append(f"### COMMAND: {command}\n### exit code: {res.rc}{' (timed out)' if res.timed_out else ''}\n"
                           + (res.output or "(no output)"))
             sources.append(f"command: {command[:120]}")
