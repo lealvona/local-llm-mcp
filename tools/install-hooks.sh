@@ -2,7 +2,7 @@
 # Point this clone at the tracked git hooks (pre-commit, commit-msg, pre-push, post-commit).
 # Run once after cloning. Every hook calls tools/publiccheck.py; see its docstring for what is refused.
 #   tools/install-hooks.sh              # gates only
-#   tools/install-hooks.sh --autopush   # also push every commit as soon as it lands (still gated by pre-push)
+#   tools/install-hooks.sh --autopush   # also push each topic-branch commit as it lands (never main; still gated by pre-push)
 set -eu
 top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "install-hooks: not inside a git repository" >&2; exit 2; }
 cd "$top"
