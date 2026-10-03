@@ -69,22 +69,19 @@ def test_a_direct_push_that_moves_main_is_refused(repo):
     assert _remote_tip(g, "main") == g("rev-parse", "HEAD").stdout.strip()
 
 
-def test_autopush_publishes_topic_branches_and_never_main(repo):
+def test_a_commit_is_never_pushed_automatically(repo):
+    """No hook publishes on commit, on any branch, even in a clone still carrying the old autopush setting."""
     work, g = repo
+    assert not (HOOKS / "post-commit").exists()
     g("config", "local-llm-mcp.autopush", "true")
     before = _remote_tip(g, "main")
-    (work / "a.py").write_text("x = 1\n")
-    g("add", "a.py")
-    r = g("commit", "-q", "-m", "on main")
-    assert "main is published by merging a pull request" in r.stderr
-    assert _remote_tip(g, "main") == before
-    g("switch", "-q", "-c", "topic")
-    (work / "b.py").write_text("y = 2\n")
-    g("add", "b.py")
-    g("commit", "-q", "-m", "on a branch")
-    assert _remote_tip(g, "topic") == g("rev-parse", "HEAD").stdout.strip()
-    assert g("rev-parse", "--abbrev-ref", "topic@{upstream}").stdout.strip() == "origin/topic"
-    assert _remote_tip(g, "main") == before
+    for branch in ("main", "topic"):
+        if branch != "main":
+            g("switch", "-q", "-c", branch)
+        (work / f"{branch}.py").write_text("x = 1\n")
+        g("add", f"{branch}.py")
+        g("commit", "-q", "-m", f"on {branch}")
+    assert _remote_tip(g, "main") == before and _remote_tip(g, "topic") is None
 
 
 def test_staged_private_address_is_refused(repo):
@@ -179,7 +176,7 @@ def test_installer_is_scoped_to_this_repository(tmp_path):
     env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
     other = tmp_path / "other"
     subprocess.run(["git", "init", "-q", str(other)], check=True, env=env)
-    r = subprocess.run(["bash", str(ROOT / "tools/install-hooks.sh"), "--autopush"], cwd=other, env=env, capture_output=True, text=True)
+    r = subprocess.run(["bash", str(ROOT / "tools/install-hooks.sh")], cwd=other, env=env, capture_output=True, text=True)
     assert r.returncode == 2 and "not the local-llm-mcp repository" in r.stderr
     assert subprocess.run(["git", "config", "--local", "--get", "core.hooksPath"], cwd=other, env=env, capture_output=True).returncode != 0
     assert not (tmp_path / "gitconfig").exists() or "hooksPath" not in (tmp_path / "gitconfig").read_text()

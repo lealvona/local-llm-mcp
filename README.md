@@ -713,7 +713,6 @@ points a clone at the tracked hooks in `tools/githooks/`, and every one of them 
 | `pre-commit` | staged content or file names carrying a private network address, a home-directory path, a non-example e-mail, a tailnet name, or a denylisted term; then `gitleaks` on the staged changes when it is installed |
 | `commit-msg` | the same terms in the message; any attribution trailer (`Co-Authored-By`, "generated with"); an author or committer other than the identity configured for the repository (`--author`, `GIT_AUTHOR_*`, `-c user.email` are all caught) |
 | `pre-push` | every commit the push would publish, checked in full — identity, message, file names and the whole tree at that commit — so a commit made with `--no-verify`, a rebase, a cherry-pick or an amend cannot slip past the earlier two; and any direct push that moves an existing `main` — it changes by merging a pull request (`LOCAL_LLM_MCP_ALLOW_MAIN_PUSH=1` overrides once) |
-| `post-commit` | nothing; with `--autopush` it pushes each commit made on a topic branch as it lands, still through `pre-push`, so the branch is ready for a pull request. Commits on `main` are never pushed |
 
 The **denylist** is a private file the repository never sees — one term per line in
 `$LOCAL_LLM_MCP_DENYLIST` (default `~/.config/local-llm-mcp/publiccheck-denylist.txt`):

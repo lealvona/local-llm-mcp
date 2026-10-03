@@ -14,12 +14,13 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
   token unset served the whole PII vault to anyone who found the port. It now refuses to start; set
   `LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN=1` if that is genuinely what you want.
 
-### Changed — main moves only through a pull request
-- `--autopush` used to push every commit the moment it landed, on whatever branch — `main` included, so a
-  commit went public with no review. It now pushes only topic branches (setting the upstream on the first
-  push), ready for a pull request; a commit on `main` stays local with a note saying why.
-- `pre-push` refuses a direct push that moves an existing `main`, whatever started it — autopush or a hand-typed
-  `git push`. A first push that creates the branch is still allowed. `LOCAL_LLM_MCP_ALLOW_MAIN_PUSH=1` overrides once.
+### Changed — nothing is pushed automatically; main moves only through a pull request
+- `--autopush` and its `post-commit` hook are gone. They pushed every commit the moment it landed, on whatever
+  branch — `main` included — so work went public with no review. A commit is not a reason to publish: push
+  when the work is ready. `install-hooks.sh` clears the old setting from a clone that had it.
+- `pre-push` refuses a direct push that moves an existing `main`, and still scans the commits so every problem
+  is reported at once. A first push that creates the branch is allowed, and so is every push of any other
+  branch. `LOCAL_LLM_MCP_ALLOW_MAIN_PUSH=1` overrides once.
 
 ### The command policy
 

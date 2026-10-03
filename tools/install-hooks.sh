@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Point this clone at the tracked git hooks (pre-commit, commit-msg, pre-push, post-commit).
+# Point this clone at the tracked git hooks (pre-commit, commit-msg, pre-push).
 # Run once after cloning. Every hook calls tools/publiccheck.py; see its docstring for what is refused.
-#   tools/install-hooks.sh              # gates only
-#   tools/install-hooks.sh --autopush   # also push each topic-branch commit as it lands (never main; still gated by pre-push)
+#   tools/install-hooks.sh
+# Nothing is ever pushed automatically: push when the work is ready; main moves by merging a pull request.
 set -eu
 top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "install-hooks: not inside a git repository" >&2; exit 2; }
 cd "$top"
@@ -11,7 +11,7 @@ grep -q '^name = "local-llm-mcp"' pyproject.toml 2>/dev/null && [ -x tools/githo
   || { echo "install-hooks: $top is not the local-llm-mcp repository; nothing changed" >&2; exit 2; }
 chmod +x tools/githooks/*
 git config --local core.hooksPath tools/githooks
-if [ "${1:-}" = "--autopush" ]; then git config --local local-llm-mcp.autopush true; fi
-auto=$(git config --bool --get local-llm-mcp.autopush 2>/dev/null || echo false)
-echo "git hooks installed: core.hooksPath=tools/githooks (pre-commit, commit-msg, pre-push; autopush=$auto)"
+[ "${1:-}" = "--autopush" ] && echo "install-hooks: --autopush was removed; nothing is pushed automatically any more" >&2
+git config --local --unset local-llm-mcp.autopush 2>/dev/null || true
+echo "git hooks installed: core.hooksPath=tools/githooks (pre-commit, commit-msg, pre-push)"
 [ -n "$(git config --get user.email || true)" ] || echo "warning: no user.email configured for this repository — commits will be refused until one is set" >&2
