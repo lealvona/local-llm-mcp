@@ -253,6 +253,11 @@ def commits(spec: str | None, everything: bool) -> list[str]:
     return [c for c in git(*args).split() if c]
 
 
+# The committer GitHub records when a pull request is merged on the site. Public and generic: it names no
+# person. Accepted as a committer in history scans only; a local commit claiming it is still refused.
+GITHUB_MERGE_COMMITTER = ("GitHub", "noreply@github.com")  # public:allow non-example email address
+
+
 def scan_commits(s: Scanner, revs: list[str]) -> None:
     check_identity = bool(expected_identity()[1])
     if not check_identity:
@@ -262,7 +267,8 @@ def scan_commits(s: Scanner, revs: list[str]) -> None:
         an, ae, cn, ce, body = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", c).split("\0", 4)
         if check_identity:
             s.identity(an, ae, "author", f"commit {short}")
-            s.identity(cn, ce, "committer", f"commit {short}")
+            if (cn, ce) != GITHUB_MERGE_COMMITTER:  # merging a pull request on GitHub; the author is still checked
+                s.identity(cn, ce, "committer", f"commit {short}")
         s.message(body, f"commit {short} message")
         for line in git("ls-tree", "-r", "-z", c).split("\0"):
             if not line:
