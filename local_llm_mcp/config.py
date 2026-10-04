@@ -185,6 +185,10 @@ class Config:
     observer: str
     observer_path: Path | None
     observer_url: str
+    decide: bool
+    decide_prefer: str
+    decide_timeout: float
+    decide_reasoning: bool
     session_override: str
     log_level: str
 
@@ -210,6 +214,9 @@ class Config:
         assist_numbers = (_env("ASSIST_NUMBERS", "masked") or "masked").strip().lower()
         if assist_numbers not in ("masked", "open"):
             raise ConfigError(f"{ENV_PREFIX}ASSIST_NUMBERS must be 'masked' or 'open', got {assist_numbers!r}")
+        decide_prefer = (_env("DECIDE_PREFER", "primary") or "primary").strip().lower()
+        if decide_prefer not in ("primary", "fallback"):
+            raise ConfigError(f"{ENV_PREFIX}DECIDE_PREFER must be primary or fallback, got {decide_prefer!r}")
         return cls(
             mode=mode,
             base_url=base_url,
@@ -249,6 +256,10 @@ class Config:
             observer=(_env("OBSERVER") or "").strip(),
             observer_path=_opt_path("OBSERVER_PATH"),
             observer_url=(_env("OBSERVER_URL") or "").strip().rstrip("/"),
+            decide=_bool("DECIDE", False),
+            decide_prefer=decide_prefer,
+            decide_timeout=_float("DECIDE_TIMEOUT_S", 5.0),
+            decide_reasoning=_bool("DECIDE_REASONING", True),
             session_override=(_env("SESSION") or "").strip(),
             log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),
         )

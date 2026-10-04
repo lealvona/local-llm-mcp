@@ -257,6 +257,12 @@ Compact now. Normally automatic; useful when a client has no `PreCompact` hook.
 Switch `pii` ↔ `assist` for the rest of the conversation; returns the instructions for
 the new mode so the caller learns the rule in-context.
 
+### Optional: `local_llm_decide` and `local_llm_governance`
+
+Present only when `LOCAL_LLM_MCP_DECIDE=1`. They ask your own worker to pick one of a short list of named
+options, as advice that never acts — nothing extra to install. Off (the default), the server exposes nothing
+of it. Details, settings and how a decision is made: [docs/DECISIONS.md](docs/DECISIONS.md).
+
 ## The privacy boundary
 
 ### Placeholders
@@ -569,6 +575,9 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_ADMIN_TOKEN` / `_ADMIN_TOKEN_FILE` | unset | bearer token the admin API requires (set it whenever the bind is not loopback — a non-loopback bind with neither this nor the override below set refuses to start) |
 | `LOCAL_LLM_MCP_ADMIN_ALLOW_NO_TOKEN` | `0` | start anyway on a non-loopback bind with no token |
 | `LOCAL_LLM_MCP_LOG_LEVEL` | `INFO` | stderr logging |
+| `LOCAL_LLM_MCP_DECIDE` | `0` | optional decision tools answered by your own worker; `0` exposes none of them ([docs/DECISIONS.md](docs/DECISIONS.md)) |
+| `LOCAL_LLM_MCP_DECIDE_PREFER` | `primary` | which worker answers decisions first: `primary` or `fallback` |
+| `LOCAL_LLM_MCP_DECIDE_REASONING` / `_DECIDE_TIMEOUT_S` | `1` / `5` | one sentence of reasoning before the (still restricted) choice; how long the first request may take before the engine asks without the restriction |
 
 CLI: `local-llm-mcp [--mode pii|assist] [--session KEY] [--check]`.
 

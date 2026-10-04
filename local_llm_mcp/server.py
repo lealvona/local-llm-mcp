@@ -38,11 +38,27 @@ from . import verbatim as vb
 log = logging.getLogger("local_llm_mcp.server")
 
 
+def build_decider(cfg: Config):
+    """The decision engine over this server's own workers: the primary and the configured fallback, in the
+    order LOCAL_LLM_MCP_DECIDE_PREFER asks for (a smaller dense model can be the better judge)."""
+    from .decision_engine import Engine, Worker
+    extra = {} if cfg.thinking else {"chat_template_kwargs": {"enable_thinking": False}}
+    workers = [Worker(cfg.base_url, cfg.model, cfg.api_key, extra)]
+    if cfg.fallback_base_url:
+        workers.append(Worker(cfg.fallback_base_url, cfg.fallback_model or cfg.model, cfg.fallback_api_key, extra))
+    if cfg.decide_prefer == "fallback":
+        workers.reverse()
+    return Engine(workers, timeout=cfg.decide_timeout, reasoning=cfg.decide_reasoning)
+
+
 class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.session = Session(cfg)
         self.llm = LocalLLM(cfg)
+        self.decider = None
+        if cfg.decide:  # optional, off by default: nothing is created or exposed unless switched on
+            self.decider = build_decider(cfg)
         self.scrubber = Scrubber(cfg.rules_path, cfg.private_terms_path, strict=cfg.strict_pii, shapes=cfg.shapes)
         self.observer = load_observer(cfg)
         self.prices = sv.Prices(cfg.prices_path, cfg.caller_model)
@@ -858,6 +874,7 @@ def build(cfg: Config) -> FastMCP:
         a = _app()
         a.note_client(ctx)
         st = a.session.status()
+        st["decide"] = {"enabled": True, **a.decider.status()} if a.decider else {"enabled": False}
         st["client"] = a.session.meta.get("client") or None
         a.session.reload_meta_if_changed()
         armed_rec = a.session.meta.get("armed") if isinstance(a.session.meta.get("armed"), dict) else {}
@@ -1002,4 +1019,7 @@ def build(cfg: Config) -> FastMCP:
         return json.dumps({"mode": a.mode, **d.to_meta(), "open_kinds": sorted(a.policy().open),
                            "note": "secrets are never shown; in PII mode everything is masked regardless"}, indent=1)
 
+    if cfg.decide:
+        from .decide_tools import register as register_decide_tools
+        register_decide_tools(mcp, _app)
     return mcp

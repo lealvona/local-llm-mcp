@@ -4,6 +4,18 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Added — optional decisions from your own worker (off by default)
+- `LOCAL_LLM_MCP_DECIDE=1` adds `local_llm_decide`, `local_llm_governance` (three preset policies) and the
+  `local-llm://decision-policies` resource. Your existing worker answers — no extra model or server. Left off,
+  nothing of it is registered or created.
+- The reply is restricted to the caller's option ids with vLLM `structured_outputs` and checked anyway; a slow
+  first request or an ignored restriction falls back to a strict re-ask; the other worker is tried when one
+  fails; no valid answer is `unavailable`, never a guess. By default the worker gives one sentence of
+  reasoning first (`LOCAL_LLM_MCP_DECIDE_REASONING`), and `LOCAL_LLM_MCP_DECIDE_PREFER` chooses which worker
+  answers first.
+- The evidence is fenced as untrusted data in the prompt, so instructions or suggested answers inside it are
+  ignored, and every caller string is scrubbed on its own before it leaves. See `docs/DECISIONS.md`.
+
 ### Fixed — an audit for adopters other than the maintainer
 - `local_llm_run`/`local_llm_delegate`'s command execution hardcoded `executable="/bin/bash"`. On any
   system where bash isn't at that exact path (NixOS, some minimal containers) every command call raised
