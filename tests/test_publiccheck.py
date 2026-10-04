@@ -40,10 +40,48 @@ def repo(tmp_path):
 
 def test_clean_commit_and_push_pass(repo):
     work, g = repo
+    g("switch", "-q", "-c", "topic")
     (work / "a.py").write_text("print('fine')\n")
     g("add", "a.py")
     assert g("commit", "-q", "-m", "add a").returncode == 0
-    assert g("push", "-q").returncode == 0
+    assert g("push", "-q", "-u", "origin", "topic").returncode == 0
+
+
+def _remote_tip(g, branch):
+    r = g("ls-remote", "origin", f"refs/heads/{branch}")
+    return r.stdout.split()[0] if r.stdout else None
+
+
+def test_a_direct_push_that_moves_main_is_refused(repo):
+    """main changes by merging a pull request. The fixture's first push created it, which stays allowed."""
+    work, g = repo
+    before = _remote_tip(g, "main")
+    (work / "a.py").write_text("x = 1\n")
+    g("add", "a.py")
+    g("commit", "-q", "-m", "straight to main")
+    r = g("push", "-q", check=False)
+    assert r.returncode != 0 and "direct push to main" in r.stderr
+    assert _remote_tip(g, "main") == before
+    r = subprocess.run(["git", "push", "-q"], cwd=work, capture_output=True, text=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": str(work.parent / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+                            "LOCAL_LLM_MCP_DENYLIST": str(work.parent / "deny.txt"), "LOCAL_LLM_MCP_ALLOW_MAIN_PUSH": "1"})
+    assert r.returncode == 0 and "allowed by" in r.stderr
+    assert _remote_tip(g, "main") == g("rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_commit_is_never_pushed_automatically(repo):
+    """No hook publishes on commit, on any branch, even in a clone still carrying the old autopush setting."""
+    work, g = repo
+    assert not (HOOKS / "post-commit").exists()
+    g("config", "local-llm-mcp.autopush", "true")
+    before = _remote_tip(g, "main")
+    for branch in ("main", "topic"):
+        if branch != "main":
+            g("switch", "-q", "-c", branch)
+        (work / f"{branch}.py").write_text("x = 1\n")
+        g("add", f"{branch}.py")
+        g("commit", "-q", "-m", f"on {branch}")
+    assert _remote_tip(g, "main") == before and _remote_tip(g, "topic") is None
 
 
 def test_staged_private_address_is_refused(repo):
@@ -91,6 +129,8 @@ def test_wrong_identity_is_refused(repo):
 
 def test_push_refuses_a_commit_that_bypassed_the_earlier_hooks(repo):
     work, g = repo
+    g("switch", "-q", "-c", "topic")
+    g("push", "-q", "-u", "origin", "topic")
     (work / "d.py").write_text("HOST = '10.1.2.3'\n")  # public:allow: synthetic fixture
     g("add", "d.py")
     assert g("commit", "-q", "--no-verify", "-m", "sneaky").returncode == 0  # skips pre-commit and commit-msg
@@ -136,7 +176,7 @@ def test_installer_is_scoped_to_this_repository(tmp_path):
     env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
     other = tmp_path / "other"
     subprocess.run(["git", "init", "-q", str(other)], check=True, env=env)
-    r = subprocess.run(["bash", str(ROOT / "tools/install-hooks.sh"), "--autopush"], cwd=other, env=env, capture_output=True, text=True)
+    r = subprocess.run(["bash", str(ROOT / "tools/install-hooks.sh")], cwd=other, env=env, capture_output=True, text=True)
     assert r.returncode == 2 and "not the local-llm-mcp repository" in r.stderr
     assert subprocess.run(["git", "config", "--local", "--get", "core.hooksPath"], cwd=other, env=env, capture_output=True).returncode != 0
     assert not (tmp_path / "gitconfig").exists() or "hooksPath" not in (tmp_path / "gitconfig").read_text()

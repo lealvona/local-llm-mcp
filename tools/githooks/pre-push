@@ -9,6 +9,15 @@ status=0
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "$z" ] && continue                      # deleting a remote ref publishes nothing
+  # A published main moves only by merging a pull request. Creating it (a first push) is allowed.
+  if [ "$remote_ref" = "refs/heads/main" ] && [ "${remote_sha:-$z}" != "$z" ]; then
+    case "${LOCAL_LLM_MCP_ALLOW_MAIN_PUSH:-}" in
+      1|true|yes) echo "pre-push: direct push to main allowed by LOCAL_LLM_MCP_ALLOW_MAIN_PUSH" >&2 ;;
+      *) echo "pre-push: REFUSED — direct push to main. Push a branch and open a pull request" \
+              "(LOCAL_LLM_MCP_ALLOW_MAIN_PUSH=1 overrides once)." >&2
+         status=1 ;;                                       # still scan below: report every problem at once
+    esac
+  fi
   if [ "${remote_sha:-$z}" = "$z" ] || ! git cat-file -e "$remote_sha" 2>/dev/null; then
     spec="$local_sha"                                      # new branch, or an unknown remote tip: everything not on a remote
   else
