@@ -314,3 +314,26 @@ def test_this_repository_history_is_clean(tmp_path):
     r = subprocess.run([sys.executable, str(CHECK), "--all"], cwd=ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "NO DENYLIST was found" in r.stdout  # and it says so, rather than reporting "clean"
+
+
+def test_a_pull_request_merged_on_github_passes_the_history_scan(repo, tmp_path):
+    """Merging on GitHub records GitHub as the committer. That identity names no one and is accepted;
+    the author is still checked, so a merge cannot carry someone else's name in."""
+    work, g = repo
+    def commit_as(committer, author, name):
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_COMMITTER_NAME": committer[0], "GIT_COMMITTER_EMAIL": committer[1],
+               "GIT_AUTHOR_NAME": author[0], "GIT_AUTHOR_EMAIL": author[1]}
+        (work / f"{name}.py").write_text("x = 1\n")
+        g("add", f"{name}.py")
+        subprocess.run(["git", "commit", "-q", "--no-verify", "-m", name], cwd=work, env=env, check=True)
+    def history():
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+               "LOCAL_LLM_MCP_DENYLIST": str(tmp_path / "deny.txt")}
+        return subprocess.run([sys.executable, str(CHECK), "--all"], cwd=work, env=env, capture_output=True, text=True)
+    me, github = ("Test Author", "author@example.org"), ("GitHub", "noreply@github.com")  # public:allow non-example email address
+    commit_as(github, me, "merged")
+    assert history().returncode == 0
+    commit_as(github, github, "not-mine")
+    r = history()
+    assert r.returncode != 0 and "author is" in r.stderr
