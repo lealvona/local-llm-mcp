@@ -671,7 +671,7 @@ the parts the caller never sees:
 | Scrub tester | paste text, pick a mode | the text as it would leave the server, every detected span highlighted by kind, and the placeholders that would be minted |
 | Rules · Config | the shape rules in force and their source; the effective configuration (key shown as set/unset) | read-only |
 
-**Onboarding page — `/onboard`.** A guided way to fill in the private terms. It lists suggestions to confirm,
+**Onboarding page — `/onboard`.** A guided way to fill in the private terms. It uses the admin token; a link can carry it as `/onboard#token=<token>` (a fragment never reaches the server, and the page removes it from the address bar at once). It lists suggestions to confirm,
 correct or reject: from an optional seed file your deployment provides (`LOCAL_LLM_MCP_TERMS_SEED`, default
 `~/.config/local-llm-mcp/terms-seed.json`, `{"suggestions": [{"kind", "value", "source", "confidence", "note"}]}`),
 from this machine (git name and e-mail, the account's full name, the login name) and from variants of the names.
