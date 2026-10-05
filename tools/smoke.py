@@ -101,8 +101,12 @@ async def main() -> int:
             tools = await s.list_tools()
             names = sorted(t.name for t in tools.tools)
             print("[tools]", names)
-            check(names == ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_disclosure", "local_llm_enable", "local_llm_run",
-                            "local_llm_set_mode", "local_llm_status"], "eight tools registered")
+            core = ["local_llm_artifact", "local_llm_compact", "local_llm_delegate", "local_llm_disclosure", "local_llm_enable", "local_llm_run",
+                    "local_llm_set_mode", "local_llm_status"]
+            optional = ["local_llm_decide", "local_llm_governance"]  # LOCAL_LLM_MCP_DECIDE=1 adds both, never one
+            extra = sorted(set(names) - set(core))
+            check(set(core) <= set(names) and extra in ([], optional),
+                  f"the eight core tools registered{', plus the two decision tools' if extra else ''}")
 
             st = json.loads(text(await s.call_tool("local_llm_status", {})))
             print(f"[status] key={st['session_key']} mode={st['mode']} sock={st['control_socket']}")
