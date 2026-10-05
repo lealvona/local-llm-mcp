@@ -285,31 +285,41 @@ def test_lint_flags_terms_that_would_over_mask(onboard):
     assert w[0] and w[1] and w[2] and w[3] and w[4] == []
 
 
-def test_onboard_takes_the_token_from_the_fragment_and_wipes_it(tmp_path):
-    """/onboard#token=… : the fragment never reaches the server; the page must keep the token for the session and
-    remove it from the address bar and history. Runs the page's own code under node with a stand-in browser."""
+@pytest.mark.parametrize("page", ["index.html", "onboard.html"])
+def test_admin_pages_take_the_token_from_url_arguments_and_wipe_it(tmp_path, page):
+    """?token=… or #token=… : the page keeps the token for the session (it then goes out as the Authorization
+    header) and removes it from the address bar and history, keeping the rest of the URL. Runs the page's own
+    marked code under node with a stand-in browser."""
     import shutil, subprocess
     from pathlib import Path
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
-    html = (Path(__file__).parent.parent / "local_llm_mcp" / "admin" / "onboard.html").read_text()
-    start = html.index("{const m=/(?:^#|&)token=")
-    block = html[start: html.index("location.search);}}", start) + len("location.search);}}")]
+    html = (Path(__file__).parent.parent / "local_llm_mcp" / "admin" / page).read_text()
+    block = html[html.index("/*token-from-url*/"): html.index("/*end token-from-url*/")]
+    assert "'Authorization':'Bearer '+TOKEN" in html  # what the page then does with it
     script = tmp_path / "t.js"
     script.write_text("""
-const run = (hash) => {
+const run = (search, hash) => {
   const store = {}; const calls = [];
   const sessionStorage = {getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = v; }};
-  const location = {hash, pathname: '/onboard', search: ''};
+  const location = {search, hash, pathname: '/p'};
   const history = {replaceState: (s, t, url) => calls.push(url)};
-  let TOKEN = '';
+  let TOKEN = 'saved-before';
   """ + block + """
-  return {TOKEN, stored: store['llm-admin-token'] ?? null, calls};
+  return {TOKEN, stored: store['llm-admin-token'] ?? null, url: calls[0] ?? null};
 };
-console.log(JSON.stringify([run('#token=abc%20def'), run('#persons&token=xyz'), run(''), run('#other')]));
+console.log(JSON.stringify({
+  q: run('?token=abc', ''), qmore: run('?x=1&token=abc', ''), frag: run('', '#token=abc%20def'),
+  tab: run('', '#terms&token=xyz'), both: run('?token=q', '#token=h'), emptyq: run('?token=', ''),
+  none: run('', ''), tabonly: run('', '#terms'), other: run('?x=1', '')}));
 """)
-    out = json.loads(subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout)
-    assert out[0] == {"TOKEN": "abc def", "stored": "abc def", "calls": ["/onboard"]}
-    assert out[1]["TOKEN"] == "xyz" and out[1]["calls"] == ["/onboard"]
-    assert out[2] == {"TOKEN": "", "stored": None, "calls": []} and out[3]["calls"] == []
+    o = json.loads(subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout)
+    assert o["q"] == {"TOKEN": "abc", "stored": "abc", "url": "/p"}
+    assert o["qmore"] == {"TOKEN": "abc", "stored": "abc", "url": "/p?x=1"}
+    assert o["frag"] == {"TOKEN": "abc def", "stored": "abc def", "url": "/p"}
+    assert o["tab"] == {"TOKEN": "xyz", "stored": "xyz", "url": "/p#terms"}
+    assert o["both"]["TOKEN"] == "q" and o["both"]["url"] == "/p"
+    assert o["emptyq"] == {"TOKEN": "saved-before", "stored": None, "url": "/p"}  # an empty value never wipes a saved token
+    for k in ("none", "tabonly", "other"):
+        assert o[k] == {"TOKEN": "saved-before", "stored": None, "url": None}, k

@@ -122,11 +122,17 @@ const $=s=>document.querySelector(s);
 function el(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(v==null||v===false)continue;if(k.startsWith('on'))e[k]=v;else if(k==='style')e.style.cssText=v;else e.setAttribute(k,v===true?'':v);}for(const c of kids.flat()){if(c==null)continue;e.append(c.nodeType?c:document.createTextNode(String(c)));}return e;}
 const kstyle=k=>`--k:var(--k-${k})`;
 let TOKEN=sessionStorage.getItem('llm-admin-token')||'';
-// A link may carry the token in the FRAGMENT (/onboard#token=…): browsers never send a fragment to the server, so it
-// stays out of access logs and Referer headers. Take it, keep it for this browser session, and drop it from the address
-// bar and history at once so it is not left on screen or bookmarked.
-{const m=/(?:^#|&)token=([^&]+)/.exec(location.hash);if(m){try{TOKEN=decodeURIComponent(m[1]).trim();}catch(e){}
-  sessionStorage.setItem('llm-admin-token',TOKEN);history.replaceState(null,'',location.pathname+location.search);}}
+/*token-from-url*/
+// A link may carry the admin token as ?token=… or #token=…. Prefer the fragment: a browser never sends it to the
+// server, so it stays out of access logs (this server logs no URLs by default either). Either way the page keeps the
+// token for this browser session, sends it as the Authorization header on every API call, and removes it from the
+// address bar and history at once; the rest of the URL (other arguments, a #tab) is kept.
+{const q=new URLSearchParams(location.search),hm=/(?:^#|&)token=([^&]*)/.exec(location.hash);
+ if(q.has('token')||hm){let t=q.get('token');if(t==null&&hm){try{t=decodeURIComponent(hm[1]);}catch(e){t='';}}
+  t=(t||'').trim();if(t){TOKEN=t;sessionStorage.setItem('llm-admin-token',TOKEN);}
+  q.delete('token');const rest=location.hash.replace(/(^#|&)token=[^&]*/,'$1').replace(/^#&/,'#').replace(/&$/,'');
+  history.replaceState(null,'',location.pathname+(q.toString()?'?'+q.toString():'')+(rest==='#'?'':rest));}}
+/*end token-from-url*/
 let DOC={terms:[]},SUG=[],BACKUP={},CHOICE={};  // CHOICE[id] = {state:'accept'|'reject', kind, value}
 const ADDED=[]; // manual additions staged for saving: {kind,value}
 function toast(msg,bad){const t=el('div',{class:'toast'+(bad?' bad':'')},msg);$('#toasts').append(t);setTimeout(()=>t.remove(),bad?7000:3200);}
