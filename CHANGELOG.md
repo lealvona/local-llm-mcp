@@ -41,6 +41,9 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 - `pre-push` refuses a direct push that moves an existing `main`, and still scans the commits so every problem
   is reported at once. A first push that creates the branch is allowed, and so is every push of any other
   branch. `LOCAL_LLM_MCP_ALLOW_MAIN_PUSH=1` overrides once.
+- `pre-push` also runs the user's own global `pre-push` (from `git config --global core.hooksPath`). This repository's
+  local hooks path replaces the global hooks, which silently switched off any machine-wide guard (for example one that
+  refuses to push a secret from the user's key files). Nothing changes where no global hooks are configured.
 - The history scan accepts GitHub as the **committer** of a pull request merged on the site (it names no one).
   The author is still checked. Without this, the first merge through a pull request failed the repository's
   own history check on any machine with an identity configured.
