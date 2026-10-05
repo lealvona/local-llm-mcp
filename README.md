@@ -626,8 +626,19 @@ a card.
 }
 ```
 
-Case-insensitive, whole-word, longest first, hot-reloaded. Put the names, addresses and
-numbers of the people this deployment protects here; keep usernames and hostnames out
+Case-insensitive, whole-word, longest first, hot-reloaded. **Each term matches in every common format, so
+write it once, any way:**
+
+| Kind | Also matched |
+|---|---|
+| `PHONE` | the same digits with any separators (spaces, dots, dashes, brackets, slashes) or none; with or without the country code (`+1`/`1`/`001` for a 10- or 11-digit North-American number, `+`/`00` for one saved with a prefix); never inside a longer number |
+| `ACCOUNT`, `PII` that are numbers (6+ digits) | the same digits grouped with spaces, dashes or dots, or not at all |
+| `EMAIL` | `name at domain dot com`, `name [at] domain [dot] com`, `name (at) …`, any case |
+| `ADDRESS` | written out or abbreviated (Street/St., Avenue/Ave, Apartment/Apt/Unit/#, North/N., Suite/Ste, …), commas and full stops optional, parts across line breaks |
+| `PERSON` | any spacing or line break between the parts, `Last, First`, a middle initial |
+
+The vault records the value as you saved it, so a placeholder always restores to that form. Put the names,
+addresses and numbers of the people this deployment protects here; keep usernames and hostnames out
 (they appear in every path). This is the deterministic floor for identity that no
 pattern can infer; the entity pass adds what the worker finds on top.
 
