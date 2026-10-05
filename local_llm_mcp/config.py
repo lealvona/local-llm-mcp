@@ -182,6 +182,8 @@ class Config:
     sock_dir: Path
     rules_path: Path | None
     private_terms_path: Path
+    terms_seed_path: Path
+    terms_backup_stamp: Path | None
     observer: str
     observer_path: Path | None
     observer_url: str
@@ -253,6 +255,8 @@ class Config:
             sock_dir=_path("SOCK_DIR", default_sock_dir()),
             rules_path=_opt_path("RULES"),
             private_terms_path=_path("PRIVATE_TERMS", "~/.config/local-llm-mcp/private_terms.json"),
+            terms_seed_path=_path("TERMS_SEED", "~/.config/local-llm-mcp/terms-seed.json"),
+            terms_backup_stamp=_opt_path("TERMS_BACKUP_STAMP"),
             observer=(_env("OBSERVER") or "").strip(),
             observer_path=_opt_path("OBSERVER_PATH"),
             observer_url=(_env("OBSERVER_URL") or "").strip().rstrip("/"),

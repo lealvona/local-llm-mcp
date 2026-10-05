@@ -61,6 +61,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size
   <section id="tab-overview"><div class="tiles" id="tiles"></div><div class="panel"><h2>What this manages</h2>
     <div class="help">The PII layer of local-llm-mcp: <b>private terms</b> the scrub always replaces (names, addresses, numbers no pattern can infer), every conversation's <b>placeholder vault</b> and memory, and a <b>scrub tester</b> that shows what each mode would remove. Values are masked at rest on this page; tick <i>reveal values</i> or hover a value to read it. Nothing here leaves this host.</div></div></section>
   <section id="tab-terms" hidden>
+    <div class="panel"><h2>Guided onboarding</h2><div class="help">Review suggested terms, correct them, and fill each category with guidance: <a href="/onboard">open the onboarding page</a>.</div></div>
     <div class="panel"><h2>Add a term</h2>
       <div class="form"><select id="t-kind"></select><input id="t-value" placeholder="exactly as it appears in text" style="min-width:320px"><button class="b primary" id="t-add">add</button></div>
       <div class="help">Case-insensitive, whole-word. Keep usernames and hostnames out (they appear in every path). Kinds: PERSON, ADDRESS, PHONE, EMAIL, ACCOUNT, PII.</div></div>

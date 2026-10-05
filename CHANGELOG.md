@@ -4,6 +4,14 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Added — a guided onboarding page for private terms
+- The admin app serves `/onboard`: suggestions to confirm, correct or reject (from an optional seed file, this
+  machine's git identity and account name, and name variants), guidance per category, over-masking warnings, a
+  *Try it* scrub preview, staged choices with an unsaved-changes guard, and a backup-status chip
+  (`LOCAL_LLM_MCP_TERMS_BACKUP_STAMP`). Rejected suggestions are remembered only as hashes. New endpoints:
+  `GET /api/terms/suggestions`, `POST /api/terms/review`, `POST /api/terms/lint`, `GET /api/terms/backup`,
+  `DELETE /api/terms/rejections`.
+
 ### Added — optional decisions from your own worker (off by default)
 - `LOCAL_LLM_MCP_DECIDE=1` adds `local_llm_decide`, `local_llm_governance` (three preset policies) and the
   `local-llm://decision-policies` resource. Your existing worker answers — no extra model or server. Left off,

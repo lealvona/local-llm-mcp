@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -43,6 +45,34 @@ from .scrub import KINDS, PLACEHOLDER_RE, Policy, Scrubber, Vault
 
 log = logging.getLogger("local_llm_mcp.admin")
 INDEX = Path(__file__).parent / "admin" / "index.html"
+ONBOARD = Path(__file__).parent / "admin" / "onboard.html"
+
+# Words that would make a disastrous literal term: masking them hides ordinary text everywhere.
+_COMMON = frozenset("""the and for with from this that you your our not are was were have has had will can all any but
+home work mail email phone name user admin root test info http https www com org net local localhost main master
+new old one two box road street lane drive avenue north south east west""".split())
+
+
+def _term_hash(kind: str, value: str) -> str:
+    """Rejections are remembered by hash, so a value the user refused is not kept in plain text."""
+    return hashlib.sha256(f"{kind.upper()}\0{' '.join(value.split()).casefold()}".encode()).hexdigest()
+
+
+def lint_term(kind: str, value: str) -> list[str]:
+    """Warnings for a literal that would over-mask or never match. Advisory: the user decides."""
+    v = " ".join(str(value).split())
+    w = []
+    if len(v) < 3:
+        w.append("very short: it will be masked inside many other words")
+    elif v.casefold() in _COMMON:
+        w.append("a common word: masking it will hide ordinary text")
+    if v.isdigit() and len(v) < 5:
+        w.append("a short number: it will match unrelated numbers")
+    if kind.upper() == "PERSON" and len(v.split()) == 1 and len(v) >= 3:
+        w.append("a single name: every occurrence of this word is masked, in any context")
+    if kind.upper() == "EMAIL" and "@" not in v:
+        w.append("no @: this does not look like an e-mail address")
+    return w
 _KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _TERM_KINDS = ("PERSON", "ADDRESS", "PHONE", "EMAIL", "ACCOUNT", "PII")
 
@@ -122,6 +152,121 @@ class AdminState:
                 self.save_terms(doc)
                 return True
         return False
+
+    # ---- onboarding: suggestions, review, backup status ------------------------------
+
+    def _rejected_path(self) -> Path:
+        return self.cfg.state_dir / "terms-rejected.json"
+
+    def _rejected(self) -> set[str]:
+        try:
+            return set(json.loads(self._rejected_path().read_text(encoding="utf-8")).get("hashes", []))
+        except (OSError, ValueError):
+            return set()
+
+    def _local_sources(self) -> list[dict]:
+        """What this machine already says about its owner. Nothing leaves it; values only reach the page."""
+        out = []
+        def git(key):
+            try:
+                return subprocess.run(["git", "config", "--global", "--get", key], capture_output=True, text=True, timeout=5).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                return ""
+        name, email = git("user.name"), git("user.email")
+        if name:
+            out.append({"kind": "PERSON", "value": name, "source": "git config user.name", "confidence": "high"})
+        if email:
+            out.append({"kind": "EMAIL", "value": email, "source": "git config user.email", "confidence": "high"})
+        try:
+            import pwd  # POSIX only; elsewhere there is simply no account-name suggestion
+            pw = pwd.getpwuid(os.getuid())
+            gecos = pw.pw_gecos.split(",")[0].strip()
+            if gecos:
+                out.append({"kind": "PERSON", "value": gecos, "source": "account full name (passwd)", "confidence": "high"})
+            out.append({"kind": "ACCOUNT", "value": pw.pw_name, "source": "login name", "confidence": "low",
+                        "note": "also appears in every home-directory path; masking it hides those paths in results"})
+        except (ImportError, AttributeError, KeyError, OSError):
+            pass
+        return out
+
+    def _seed(self) -> list[dict]:
+        p = self.cfg.terms_seed_path
+        if not p.is_file():
+            return []
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("terms seed unreadable: %s", type(exc).__name__)
+            return []
+        items = doc.get("suggestions", []) if isinstance(doc, dict) else []
+        return [dict(it, source=it.get("source") or "seed file") for it in items if isinstance(it, dict)]
+
+    @staticmethod
+    def _variants(name: str) -> list[str]:
+        parts = name.split()
+        if len(parts) < 2 or not all(p.isalpha() for p in parts):
+            return []
+        first, last = parts[0], parts[-1]
+        return [last, f"{first[0]}. {last}", f"{first}.{last}".lower(), f"{first}{last}".lower()]
+
+    def suggestions(self) -> dict:
+        saved = {(g["kind"], v.casefold()) for g in self.terms_doc()["terms"] for v in g["values"]}
+        rejected = self._rejected()
+        raw = self._seed() + self._local_sources()
+        persons = [v for g in self.terms_doc()["terms"] if g["kind"] == "PERSON" for v in g["values"]]
+        persons += [it.get("value", "") for it in raw if str(it.get("kind", "")).upper() == "PERSON"]
+        for n in persons:
+            raw += [{"kind": "PERSON", "value": v, "source": "variant of a name", "confidence": "low"} for v in self._variants(n)]
+        out, seen = [], set()
+        for it in raw:
+            kind = str(it.get("kind", "PII")).upper()
+            kind = kind if kind in _TERM_KINDS else "PII"
+            value = " ".join(str(it.get("value", "")).split())
+            key = (kind, value.casefold())
+            if len(value) < 2 or key in saved or key in seen or _term_hash(kind, value) in rejected:
+                continue
+            seen.add(key)
+            conf = str(it.get("confidence", "medium")).lower()
+            out.append({"id": _term_hash(kind, value)[:16], "kind": kind, "value": value, "source": str(it.get("source", ""))[:120],
+                        "note": str(it.get("note", ""))[:300], "confidence": conf if conf in ("high", "medium", "low") else "medium",
+                        "warnings": lint_term(kind, value)})
+        order = {"high": 0, "medium": 1, "low": 2}
+        out.sort(key=lambda x: (order[x["confidence"]], _TERM_KINDS.index(x["kind"])))
+        return {"suggestions": out, "rejected": len(rejected), "seed": str(self.cfg.terms_seed_path),
+                "seed_present": self.cfg.terms_seed_path.is_file()}
+
+    def review(self, accept: list[dict], reject: list[dict]) -> dict:
+        added = self.add_terms(accept) if accept else 0
+        if reject:
+            hashes = self._rejected() | {_term_hash(str(r.get("kind", "PII")), str(r.get("value", ""))) for r in reject}
+            p = self._rejected_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".rejected-", dir=str(p.parent))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"_comment": "sha256 of kind + normalised value; values themselves are not kept", "hashes": sorted(hashes)}, fh)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, p)
+        return {"added": added, "rejected": len(reject), "terms": self.terms_doc(), **self.suggestions(), "backup": self.backup_status()}
+
+    def forget_rejections(self) -> int:
+        n = len(self._rejected())
+        try:
+            self._rejected_path().unlink()
+        except FileNotFoundError:
+            pass
+        return n
+
+    def backup_status(self) -> dict:
+        p, stamp = self.cfg.private_terms_path, self.cfg.terms_backup_stamp
+        current = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+        if not stamp:
+            return {"configured": False, "current": current}
+        try:
+            last = stamp.read_text(encoding="utf-8").split()[0]
+        except (OSError, IndexError):
+            last = None
+        return {"configured": True, "current": current, "last": last, "in_sync": bool(current) and current == last,
+                "stamp": str(stamp)}
 
     # ---- sessions ----------------------------------------------------------------
 
@@ -436,6 +581,17 @@ def make_handler(state: AdminState):
                 self.end_headers()
                 self.wfile.write(html)
                 return
+            if method == "GET" and path in ("/onboard", "/onboard.html"):
+                html = ONBOARD.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy",
+                                 "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+                self.end_headers()
+                self.wfile.write(html)
+                return
             if method == "GET" and path == "/api/ping":
                 return self._json(200, {"ok": True, "auth_required": bool(state.token), "authed": self._authed()})
             if not path.startswith("/api/"):
@@ -475,6 +631,24 @@ def make_handler(state: AdminState):
                 if method == "DELETE":
                     reset = state.prices.reset_override()
                     return self._json(200, {"reset": reset, **state.prices_doc()})
+            if head == "terms" and len(parts) > 1:
+                sub = parts[1]
+                if method == "GET" and sub == "suggestions":
+                    return self._json(200, {**state.suggestions(), "backup": state.backup_status()})
+                if method == "POST" and sub == "review":
+                    body = self._body()
+                    acc, rej = body.get("accept") or [], body.get("reject") or []
+                    if not isinstance(acc, list) or not isinstance(rej, list):
+                        raise ValueError("accept and reject must be lists")
+                    return self._json(200, state.review(acc, rej))
+                if method == "POST" and sub == "lint":
+                    items = self._body().get("items") or []
+                    return self._json(200, {"warnings": [lint_term(str(i.get("kind", "PII")), str(i.get("value", ""))) for i in items]})
+                if method == "GET" and sub == "backup":
+                    return self._json(200, state.backup_status())
+                if method == "DELETE" and sub == "rejections":
+                    return self._json(200, {"forgotten": state.forget_rejections()})
+                return self._json(404, {"error": "no such endpoint"})
             if head == "terms":
                 if method == "GET":
                     return self._json(200, state.terms_doc())
