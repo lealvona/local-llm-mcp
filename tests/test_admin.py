@@ -185,3 +185,101 @@ def test_the_override_lets_it_start_anyway(tmp_path, monkeypatch):
     cfg = Config.from_env()
     srv = make_server("0.0.0.0", 0, cfg, "")
     srv.server_close()
+
+
+# ---- onboarding: suggestions, review, rejections by hash, backup status --------------------------------
+
+@pytest.fixture
+def onboard(tmp_path, monkeypatch):
+    terms = tmp_path / "terms.json"
+    terms.write_text(json.dumps({"terms": [{"kind": "PERSON", "values": ["Jane Q. Example"]}]}))
+    seed = tmp_path / "seed.json"
+    seed.write_text(json.dumps({"suggestions": [
+        {"kind": "PERSON", "value": "Robin Example", "source": "test seed", "confidence": "high"},
+        {"kind": "person", "value": "jane q. example", "source": "already saved, other case"},
+        {"kind": "EMAIL", "value": "robin@example.org", "confidence": "medium"},
+        {"kind": "NOT-A-KIND", "value": "Example Corp", "note": "employer"},
+        {"kind": "PII", "value": "x"},
+    ]}))
+    stamp = tmp_path / "terms.sha256"
+    gitcfg = tmp_path / "gitconfig"
+    gitcfg.write_text("[user]\n\tname = Git Example\n\temail = git@example.org\n")
+    for k, v in {"STATE_DIR": tmp_path / "state", "SOCK_DIR": tmp_path / "sock", "PRIVATE_TERMS": terms, "PRICES": tmp_path / "p.json",
+                 "TERMS_SEED": seed, "TERMS_BACKUP_STAMP": stamp, "ENV_FILE": tmp_path / "no-env"}.items():
+        monkeypatch.setenv("LOCAL_LLM_MCP_" + k, str(v))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitcfg))  # never read the real machine's identity in a test
+    monkeypatch.delenv("LOCAL_LLM_MCP_RULES", raising=False)
+    srv = make_server("127.0.0.1", 0, Config.from_env(), "tok-secret")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", tmp_path, terms, stamp
+    srv.shutdown()
+
+
+def _values(sug):
+    return {(s["kind"], s["value"]) for s in sug["suggestions"]}
+
+
+def test_onboard_page_is_served_and_its_api_needs_the_token(onboard):
+    base, *_ = onboard
+    with urllib.request.urlopen(base + "/onboard", timeout=10) as r:
+        assert r.status == 200 and b"Private terms onboarding" in r.read()
+    for method, path in [("GET", "/api/terms/suggestions"), ("POST", "/api/terms/review"), ("GET", "/api/terms/backup"),
+                         ("DELETE", "/api/terms/rejections"), ("POST", "/api/terms/lint")]:
+        assert call(base, method, path, {} if method != "GET" else None, token="")[0] == 401
+
+
+def test_suggestions_merge_seed_and_local_sources_minus_what_is_saved(onboard):
+    base, *_ = onboard
+    code, s = call(base, "GET", "/api/terms/suggestions")
+    v = _values(s)
+    assert code == 200 and s["seed_present"]
+    assert ("PERSON", "Robin Example") in v and ("EMAIL", "robin@example.org") in v
+    assert ("PERSON", "Git Example") in v and ("EMAIL", "git@example.org") in v      # git identity
+    assert ("PII", "Example Corp") in v                                                 # unknown kind -> PII
+    assert not any(val.casefold() == "jane q. example" for _, val in v)                 # already saved, any case
+    assert ("PII", "x") not in v                                                         # too short to be a term
+    assert ("PERSON", "Example") in v and ("PERSON", "r. example") not in v             # name variants (last name)
+    assert ("PERSON", "R. Example") in v
+    robin = next(x for x in s["suggestions"] if x["value"] == "Robin Example")
+    assert robin["confidence"] == "high" and robin["source"] == "test seed"
+    last = next(x for x in s["suggestions"] if x["value"] == "Example")
+    assert any("single name" in w for w in last["warnings"])
+    assert s["suggestions"][0]["confidence"] == "high"                                  # high first
+
+
+def test_review_accepts_and_remembers_rejections_only_as_hashes(onboard):
+    base, tmp_path, terms, _ = onboard
+    code, r = call(base, "POST", "/api/terms/review", {"accept": [{"kind": "PERSON", "value": "Robin  Example"}],
+                                                       "reject": [{"kind": "EMAIL", "value": "robin@example.org"}]})
+    assert code == 200 and r["added"] == 1
+    saved = json.loads(terms.read_text())
+    assert "Robin Example" in next(g for g in saved["terms"] if g["kind"] == "PERSON")["values"]
+    assert oct(terms.stat().st_mode & 0o777) == "0o600"
+    v = _values(r)
+    assert ("PERSON", "Robin Example") not in v and ("EMAIL", "robin@example.org") not in v
+    rej = (tmp_path / "state" / "terms-rejected.json")
+    assert "robin@example.org" not in rej.read_text() and oct(rej.stat().st_mode & 0o777) == "0o600"
+    code, again = call(base, "GET", "/api/terms/suggestions")
+    assert ("EMAIL", "robin@example.org") not in _values(again) and again["rejected"] == 1
+    code, f = call(base, "DELETE", "/api/terms/rejections")
+    assert f["forgotten"] == 1
+    assert ("EMAIL", "robin@example.org") in _values(call(base, "GET", "/api/terms/suggestions")[1])
+
+
+def test_backup_status_tracks_the_terms_file(onboard):
+    base, _, terms, stamp = onboard
+    assert call(base, "GET", "/api/terms/backup")[1]["in_sync"] is False      # never backed up
+    import hashlib
+    stamp.write_text(hashlib.sha256(terms.read_bytes()).hexdigest() + "\n")
+    b = call(base, "GET", "/api/terms/backup")[1]
+    assert b["configured"] and b["in_sync"] is True
+    call(base, "POST", "/api/terms/review", {"accept": [{"kind": "PHONE", "value": "555 0100 222"}]})
+    assert call(base, "GET", "/api/terms/backup")[1]["in_sync"] is False      # changed since the stamp
+
+
+def test_lint_flags_terms_that_would_over_mask(onboard):
+    base, *_ = onboard
+    items = [{"kind": "PERSON", "value": "the"}, {"kind": "ACCOUNT", "value": "ab"}, {"kind": "PHONE", "value": "123"},
+             {"kind": "EMAIL", "value": "nobody"}, {"kind": "PERSON", "value": "Robin Example"}]
+    w = call(base, "POST", "/api/terms/lint", {"items": items})[1]["warnings"]
+    assert w[0] and w[1] and w[2] and w[3] and w[4] == []

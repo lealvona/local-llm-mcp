@@ -565,6 +565,8 @@ The process environment wins over the dotenv file
 | `LOCAL_LLM_MCP_CALLER_MODEL` | unset | headline model for the dollar figure (defaults to the prices file's `caller_model`, then the first model) |
 | `LOCAL_LLM_MCP_RULES` | built-in | JSON rules file (see below) |
 | `LOCAL_LLM_MCP_PRIVATE_TERMS` | `~/.config/local-llm-mcp/private_terms.json` | terms file (see below) |
+| `LOCAL_LLM_MCP_TERMS_SEED` | `~/.config/local-llm-mcp/terms-seed.json` | optional suggestions for the onboarding page; keep it beside the terms file, never in the repo |
+| `LOCAL_LLM_MCP_TERMS_BACKUP_STAMP` | unset | file whose first word is the sha256 of the last backed-up terms file; the onboarding page shows whether it is current |
 | `LOCAL_LLM_MCP_STATE_DIR` | `~/.local/state/local-llm-mcp` | sessions, pidmap |
 | `LOCAL_LLM_MCP_SOCK_DIR` | `$XDG_RUNTIME_DIR/local-llm-mcp` (else `<state>/sock`) | control sockets; AF_UNIX paths cap at 108 bytes, keep it short |
 | `LOCAL_LLM_MCP_OBSERVER` | unset | `webhook`, or `module:Class` |
@@ -668,6 +670,17 @@ the parts the caller never sees:
 | Sessions | one row per conversation: live dot, mode, last seen, turns, compactions, placeholder counts, artifacts, size | open a row: the placeholder vault (placeholder → kind → value), compacted memory, recent turns, artifacts; purge placeholders, delete artifacts, delete the session — refused while a server holds it |
 | Scrub tester | paste text, pick a mode | the text as it would leave the server, every detected span highlighted by kind, and the placeholders that would be minted |
 | Rules · Config | the shape rules in force and their source; the effective configuration (key shown as set/unset) | read-only |
+
+**Onboarding page — `/onboard`.** A guided way to fill in the private terms. It lists suggestions to confirm,
+correct or reject: from an optional seed file your deployment provides (`LOCAL_LLM_MCP_TERMS_SEED`, default
+`~/.config/local-llm-mcp/terms-seed.json`, `{"suggestions": [{"kind", "value", "source", "confidence", "note"}]}`),
+from this machine (git name and e-mail, the account's full name, the login name) and from variants of the names.
+Each category comes with guidance; values that would over-mask (very short, common words, a single name) are
+flagged; a *Try it* box shows what a pasted text would look like once scrubbed. Choices are staged until you
+save. A rejected suggestion is remembered **only as a hash** (`<state>/terms-rejected.json`), so it does not
+come back and is not kept in plain text. If your deployment backs the terms file up, point
+`LOCAL_LLM_MCP_TERMS_BACKUP_STAMP` at a file holding the sha256 of the last backed-up version and the page shows
+whether the terms changed since.
 
 ```bash
 local-llm-mcp-admin                 # http://127.0.0.1:8631/  (loopback, no token)
