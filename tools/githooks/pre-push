@@ -6,6 +6,13 @@ set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 z=0000000000000000000000000000000000000000
 status=0
+refs=$(cat)
+# A repository-local core.hooksPath REPLACES the user's global hooks, so their own pre-push (for example a check
+# that no secret from their key files is ever pushed) would silently stop running here. Run it too, first.
+global=$(git config --global --get core.hooksPath 2>/dev/null || true); global="${global/#\~/$HOME}"
+if [ -n "$global" ] && [ -x "$global/pre-push" ] && [ "$(readlink -f "$global")" != "$(readlink -f "$here")" ]; then
+  printf '%s\n' "$refs" | "$global/pre-push" "$@" || { echo "pre-push: refused by your global pre-push ($global)" >&2; exit 1; }
+fi
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "$z" ] && continue                      # deleting a remote ref publishes nothing
@@ -27,5 +34,5 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
     refs/tags/*) python3 "$here/../publiccheck.py" --tag "$local_sha" || status=1 ;;
   esac
-done
+done <<< "$refs"
 exit $status

@@ -337,3 +337,31 @@ def test_a_pull_request_merged_on_github_passes_the_history_scan(repo, tmp_path)
     commit_as(github, github, "not-mine")
     r = history()
     assert r.returncode != 0 and "author is" in r.stderr
+
+
+def test_the_users_global_pre_push_still_runs(repo, tmp_path):
+    """A repository-local core.hooksPath replaces the global hooks; pre-push runs the user's global one too, so a
+    machine-wide guard (no secret from their key files may leave) is not silently switched off by this repo."""
+    work, g = repo
+    hooks = tmp_path / "global-hooks"
+    hooks.mkdir()
+    seen, verdict = tmp_path / "seen.txt", tmp_path / "verdict"
+    (hooks / "pre-push").write_text(f'#!/bin/sh\ncat > "{seen}"\nexit $(cat "{verdict}")\n')
+    (hooks / "pre-push").chmod(0o755)
+    g("config", "--global", "core.hooksPath", str(hooks))
+    g("switch", "-q", "-c", "topic")
+    (work / "a.py").write_text("x = 1\n")
+    g("add", "a.py")
+    g("commit", "-q", "-m", "add a")
+    verdict.write_text("1")
+    r = g("push", "-q", "-u", "origin", "topic", check=False)
+    assert r.returncode != 0 and "refused by your global pre-push" in r.stderr
+    verdict.write_text("0")
+    assert g("push", "-q", "-u", "origin", "topic").returncode == 0
+    assert "refs/heads/topic" in seen.read_text()          # it got the real push details on stdin
+    g("config", "--global", "--unset", "core.hooksPath")
+    seen.unlink()
+    (work / "b.py").write_text("y = 2\n")
+    g("add", "b.py")
+    g("commit", "-q", "-m", "add b")
+    assert g("push", "-q").returncode == 0 and not seen.exists()   # no global hooks configured: nothing extra runs
