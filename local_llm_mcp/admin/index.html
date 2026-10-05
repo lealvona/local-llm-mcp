@@ -109,6 +109,17 @@ const lchip=s=>{const l=s.leak_check||{};if(!l.failed)return null;const lf=l.las
 const pchip=s=>{const r=s.run_policy||{};const ran=(r.allowed||0)+(r.asked_once||0)+(r.asked_always||0)+(r.unasked||0);const no=(r.denied||0)+(r.refused||0);if(!ran&&!no)return null;const lr=r.last_refusal||{};return el('span',{class:'chip'+(no?' warn':''),title:`command policy — ran: ${r.allowed||0} on the allow list, ${r.asked_once||0} approved once, ${r.asked_always||0} approved as a shape, ${r.unasked||0} not asked (no dialog); not run: ${r.denied||0} refused by a deny shape, ${r.refused||0} by the user`+(lr.ts?` · last refusal ${lr.ts} (${lr.rule||'?'}): ${lr.command||''}`:'')},`cmds ${ran}`+(no?` · ${no} refused`:''));};
 const dchip=s=>{const d=s.disclosure||{};if(s.mode!=='assist'||!d.identity)return null;const t=d.identity==='undecided'?'not asked yet':`identity ${d.identity} · numbers ${d.numbers||'masked'}`;return el('span',{class:'chip'+(d.identity==='open'||d.numbers==='open'?' warn':''),title:'disclosure'+(d.source?' via '+d.source:'')+(d.asked?`, asked ${d.asked}×`:'')},t);};
 let TOKEN=sessionStorage.getItem('llm-admin-token')||'';let REVEAL=false;
+/*token-from-url*/
+// A link may carry the admin token as ?token=… or #token=…. Prefer the fragment: a browser never sends it to the
+// server, so it stays out of access logs (this server logs no URLs by default either). Either way the page keeps the
+// token for this browser session, sends it as the Authorization header on every API call, and removes it from the
+// address bar and history at once; the rest of the URL (other arguments, a #tab) is kept.
+{const q=new URLSearchParams(location.search),hm=/(?:^#|&)token=([^&]*)/.exec(location.hash);
+ if(q.has('token')||hm){let t=q.get('token');if(t==null&&hm){try{t=decodeURIComponent(hm[1]);}catch(e){t='';}}
+  t=(t||'').trim();if(t){TOKEN=t;sessionStorage.setItem('llm-admin-token',TOKEN);}
+  q.delete('token');const rest=location.hash.replace(/(^#|&)token=[^&]*/,'$1').replace(/^#&/,'#').replace(/&$/,'');
+  history.replaceState(null,'',location.pathname+(q.toString()?'?'+q.toString():'')+(rest==='#'?'':rest));}}
+/*end token-from-url*/
 function toast(msg,bad){const t=el('div',{class:'toast'+(bad?' bad':'')},msg);$('#toasts').append(t);setTimeout(()=>t.remove(),bad?6000:3200);}
 async function api(method,path,body){
   if(DEMO)return demo(method,path,body);
