@@ -237,3 +237,78 @@ def test_nested_placeholder_from_a_worker_collapses(scrubber, vault):
     r = scrubber.scrub("card: [CARD-4111 1111 1111 1111] and again [CARD-4111 1111 1111 1111]", vault)
     assert r.text == "card: [CARD-1] and again [CARD-1]" and r.kinds == {"CARD": 2}
     assert scrubber.scrub("[PERSON-[PERSON-3]] said hi", vault).text == "[PERSON-3] said hi"
+
+
+# ---- private terms match the value in every common format ---------------------------------------------------
+
+@pytest.fixture
+def any_format(tmp_path):
+    p = tmp_path / "terms.json"
+    p.write_text(json.dumps({"terms": [
+        {"kind": "PHONE", "values": ["555-010-0222", "+44 20 7946 0958"]},
+        {"kind": "ACCOUNT", "values": ["4400 1234 5678"]},
+        {"kind": "EMAIL", "values": ["robin.example@example.org"]},
+        {"kind": "ADDRESS", "values": ["12 North Example Street, Apt 4B"]},
+        {"kind": "PERSON", "values": ["Robin Example"]},
+    ]}))
+    return Scrubber(None, p)
+
+
+@pytest.mark.parametrize("written", [
+    "555-010-0222", "(555) 010-0222", "555.010.0222", "555 010 0222", "5550100222", "+1 555 010 0222",
+    "+1-555-010-0222", "1 (555) 010-0222", "001 555 010 0222", "555–010–0222", "(555)010-0222",
+])
+def test_a_phone_number_in_any_format(any_format, vault, written):
+    r = any_format.scrub(f"call me on {written} tonight", vault)
+    assert "[PHONE-" in r.text and "0222" not in r.text, (written, r.text)
+
+
+@pytest.mark.parametrize("written", ["+44 20 7946 0958", "+442079460958", "0044 20 7946 0958", "+44 (20) 7946-0958"])
+def test_an_international_number_with_or_without_its_prefix(any_format, vault, written):
+    r = any_format.scrub(f"office {written}", vault)
+    assert "[PHONE-" in r.text and "0958" not in r.text, (written, r.text)
+
+
+@pytest.mark.parametrize("text", ["555-010-0223", "1555-010-0222-9", "order 85550100222", "555-010-02221"])
+def test_a_different_or_longer_number_is_not_the_phone(any_format, vault, text):
+    # the term layer alone: the built-in phone shape rightly masks ANY formatted number, term or not
+    assert not [sp for sp in any_format.terms.spans(text) if sp[2] == "PHONE"], text
+
+
+@pytest.mark.parametrize("written", ["4400 1234 5678", "440012345678", "4400-1234-5678", "4400.1234.5678"])
+def test_an_account_number_with_any_grouping(any_format, vault, written):
+    r = any_format.scrub(f"acct {written}.", vault)
+    assert "[ACCOUNT-" in r.text and "5678" not in r.text, (written, r.text)
+
+
+@pytest.mark.parametrize("written", ["robin.example@example.org", "ROBIN.EXAMPLE@EXAMPLE.ORG", "robin.example at example dot org",  # public:allow non-example email address
+                                     "robin.example [at] example [dot] org", "robin.example(at)example(dot)org",
+                                     "mailto:robin.example@example.org"])
+def test_an_email_in_its_usual_disguises(any_format, vault, written):
+    r = any_format.scrub(f"write to {written} please", vault)
+    assert "robin.example" not in r.text.lower(), (written, r.text)
+
+
+@pytest.mark.parametrize("written", ["12 North Example Street, Apt 4B", "12 N. Example St. Apt 4B", "12 N Example St, #4B",
+                                     "12 north example street apartment 4b", "12 North Example St\nApt 4B", "12 N Example St Unit 4B"])
+def test_an_address_written_out_or_abbreviated(any_format, vault, written):
+    r = any_format.scrub(f"Ship to: {written}", vault)
+    assert "[ADDRESS-" in r.text and "Example" not in r.text.split(":", 1)[1], (written, r.text)
+
+
+@pytest.mark.parametrize("written", ["Robin Example", "ROBIN EXAMPLE", "Robin  Example", "Robin\nExample", "Example, Robin",
+                                     "Robin J. Example", "Robin J Example"])
+def test_a_name_across_spacing_order_and_a_middle_initial(any_format, vault, written):
+    r = any_format.scrub(f"signed {written}", vault)
+    assert "[PERSON-" in r.text, (written, r.text)
+
+
+def test_near_misses_are_not_the_terms(any_format):
+    text = "Robin Examples met Robinson Example at 12 Example Lane; dial 555-010-0333"
+    assert any_format.terms.spans(text) == []
+
+
+def test_a_match_reports_the_value_as_saved_and_takes_the_whole_number(any_format):
+    text = "call (555) 010-0222 now"
+    [(a, b, kind, value)] = [sp for sp in any_format.terms.spans(text) if sp[2] == "PHONE"]
+    assert value == "555-010-0222" and text[a:b] == "(555) 010-0222"

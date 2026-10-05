@@ -4,6 +4,13 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Changed — private terms match in every common format
+- A phone number matches with any separators or none and with or without its country code; a numeric account or
+  id with any grouping; an e-mail in its usual disguises (`at`/`dot`, `[at]`, `(at)`); an address written out or
+  abbreviated, with optional punctuation and line breaks; a name across line breaks, as `Last, First`, or with a
+  middle initial. Previously a term matched only as written (apart from case), so `555-010-0222` missed
+  `(555) 010-0222`. Near-misses (a different or longer number, `Robinson` for `Robin`) still do not match.
+
 ### Added — a guided onboarding page for private terms
 - The admin app serves `/onboard`: suggestions to confirm, correct or reject (from an optional seed file, this
   machine's git identity and account name, and name variants), guidance per category, over-masking warnings, a

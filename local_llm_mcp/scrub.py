@@ -448,9 +448,105 @@ class Rules:
 # --------------------------------------------------------------------------- terms
 
 
+_SEP = r"[\s.\-()/‐-―]{0,3}"  # what may sit between the digits of a written number
+_ADDR_WORDS = {  # each group is interchangeable in an address, written out or abbreviated
+    w: g for g in (("street", "st"), ("avenue", "ave", "av"), ("road", "rd"), ("drive", "dr"), ("lane", "ln"),
+                   ("boulevard", "blvd"), ("court", "ct"), ("place", "pl"), ("terrace", "ter", "terr"), ("circle", "cir"),
+                   ("highway", "hwy"), ("parkway", "pkwy"), ("square", "sq"), ("mount", "mt"), ("saint", "st"),
+                   ("apartment", "apt", "unit", "#", "no"), ("suite", "ste"), ("building", "bldg"), ("floor", "fl"),
+                   ("north", "n"), ("south", "s"), ("east", "e"), ("west", "w"),
+                   ("northeast", "ne"), ("northwest", "nw"), ("southeast", "se"), ("southwest", "sw"),
+                   ("post office box", "po box", "p.o. box", "box"))
+    for w in g}
+
+
+def _digits_pattern(digits: str) -> str:
+    return _SEP.join(re.escape(d) for d in digits)
+
+
+def _phone_pattern(value: str) -> str | None:
+    digits = re.sub(r"\D", "", value)
+    if not 7 <= len(digits) <= 15 or re.search(r"[^\d\s.\-()+/‐-―]", value):
+        return None
+    alts = [_digits_pattern(digits)]
+    cc = r"(?:\+|00)?"
+    if len(digits) == 11 and digits[0] == "1":            # +1 NANP written with its country code
+        alts.append(_digits_pattern(digits[1:]))
+        alts[0] = cc + _SEP + alts[0]
+    elif len(digits) == 10:                               # NANP written without one: also match +1 / 1 / 001
+        alts.append(r"(?:\+|00)?1" + _SEP + _digits_pattern(digits))
+    elif value.lstrip().startswith(("+", "00")):          # international: with or without the + / 00 prefix
+        alts[0] = cc + _SEP + _digits_pattern(digits.removeprefix("00") if value.lstrip().startswith("00") else digits)
+    # never part of a longer number on either side
+    return r"(?<![\d+(])\(?(?:" + "|".join(alts) + r")(?![\s.\-]?\d)"  # a leading "(" belongs to the number
+
+
+def _email_pattern(value: str) -> str | None:
+    m = re.fullmatch(r"([^@\s]+)@([^@\s]+\.[^@\s]+)", value)
+    if not m:
+        return None
+    at = r"\s*(?:@|\(at\)|\[at\]|\{at\}|<at>|\s+at\s+)\s*"
+    dot = r"(?:\.|\s*(?:\(dot\)|\[dot\]|\{dot\})\s*|\s+dot\s+)"
+    return re.escape(m.group(1)) + at + dot.join(re.escape(p) for p in m.group(2).split("."))
+
+
+def _address_pattern(value: str) -> str:
+    words = re.findall(r"[#]|[A-Za-z0-9]+(?:'[A-Za-z]+)?", value)
+    out, i = [], 0
+    while i < len(words):
+        # multi-word forms ("post office box") first
+        for n in (3, 2, 1):
+            key = " ".join(words[i:i + n]).lower()
+            if key in _ADDR_WORDS:
+                forms = sorted(_ADDR_WORDS[key], key=len, reverse=True)
+                out.append("(?:" + "|".join(r"\s*".join(re.escape(p) + (r"\.?" if len(p) <= 4 and p != "#" else "")
+                                                         for p in f.split()) for f in forms) + ")")
+                i += n
+                break
+        else:
+            out.append(re.escape(words[i]))
+            i += 1
+    return r"[\s,.]*".join(out)
+
+
+def _person_pattern(value: str) -> str:
+    parts = value.split()
+    flex = r"\s+".join(re.escape(p) for p in parts)
+    if len(parts) == 2 and all(re.fullmatch(r"[A-Za-z][A-Za-z'\-]+", p) for p in parts):
+        first, last = map(re.escape, parts)
+        return rf"(?:{first}\s+(?:[A-Za-z]\.?\s+)?{last}|{last}\s*,\s*{first})"   # middle initial; "Last, First"
+    return flex
+
+
+def term_pattern(kind: str, value: str) -> str:
+    """The regex a private term is matched with: its literal text, plus the other ways the same value gets written —
+    a phone or account number with any separators (and a phone with or without its country code), an e-mail in
+    the usual disguises, an address written out or abbreviated, a name across line breaks or as "Last, First".
+    Case-insensitive; never inside a longer word or number."""
+    kind = kind.upper()
+    body = None
+    if kind == "PHONE" or (kind in ("ACCOUNT", "PII") and re.fullmatch(r"\+?[\d\s.\-()/]{7,}", value)):
+        body = _phone_pattern(value)
+        if body is None and kind != "PHONE" and len(re.sub(r"\D", "", value)) >= 6:
+            body = r"(?<!\d)" + _digits_pattern(re.sub(r"\D", "", value)) + r"(?!\d)"
+        if body:
+            return body
+    if kind == "EMAIL" or "@" in value:
+        body = _email_pattern(value)
+    elif kind == "ADDRESS":
+        body = _address_pattern(value)
+    elif kind == "PERSON":
+        body = _person_pattern(value)
+    if body is None:
+        body = r"\s+".join(re.escape(p) for p in value.split())
+    lead = r"(?<![A-Za-z0-9])" if value[0].isalnum() else ""
+    trail = r"(?![A-Za-z0-9])" if value[-1].isalnum() else ""
+    return lead + body + trail
+
+
 @dataclass
 class PrivateTerms:
-    """Operator-supplied literal terms (names, addresses, numbers) to always scrub."""
+    """Operator-supplied literal terms (names, addresses, numbers) to always scrub, in every format they appear in."""
 
     items: list[tuple[str, re.Pattern[str], str]] = field(default_factory=list)  # (kind, pattern, value)
     path: Path | None = None
@@ -478,10 +574,7 @@ class PrivateTerms:
                     value = str(value).strip()
                     if len(value) < 2:
                         continue
-                    esc = re.escape(value)
-                    lead = r"(?<![A-Za-z0-9])" if value[0].isalnum() else ""
-                    trail = r"(?![A-Za-z0-9])" if value[-1].isalnum() else ""
-                    items.append((kind, re.compile(lead + esc + trail, re.IGNORECASE), value))
+                    items.append((kind, re.compile(term_pattern(kind, value), re.IGNORECASE), value))
             items.sort(key=lambda it: -len(it[2]))
             self.items = items
             self.mtime = mtime
