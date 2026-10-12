@@ -4,6 +4,15 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Changed — a multi-word private term also matches with its words run together
+- A term of two or more words (any kind except an e-mail) also matches its words joined by nothing or by up to
+  three of the separators numbers already allow (spaces, dots, dashes, slashes, brackets): `Jane Example` matches
+  `JaneExample`, `janeexample`, `jane.example` and the name in `JANEEXAMPLE-notes`. It is still whole-word, so
+  `xjaneexample` and `janeexample2` do not match, and every earlier format still matches. A single-word term's
+  pattern is unchanged. The words are cut on the separators first, so no word contains one and matching stays
+  linear; a test holds 100,000 characters of adversarial text under one second.
+- A login name that is a saved name written together is now masked too, paths included.
+
 ### Changed — private terms match in every common format
 - A phone number matches with any separators or none and with or without its country code; a numeric account or
   id with any grouping; an e-mail in its usual disguises (`at`/`dot`, `[at]`, `(at)`); an address written out or

@@ -312,3 +312,75 @@ def test_a_match_reports_the_value_as_saved_and_takes_the_whole_number(any_forma
     text = "call (555) 010-0222 now"
     [(a, b, kind, value)] = [sp for sp in any_format.terms.spans(text) if sp[2] == "PHONE"]
     assert value == "555-010-0222" and text[a:b] == "(555) 010-0222"
+
+
+# ---- a multi-word term also matches with its words run together ---------------------------------------------
+
+@pytest.fixture
+def run_together(tmp_path):
+    p = tmp_path / "terms.json"
+    p.write_text(json.dumps({"terms": [
+        {"kind": "PERSON", "values": ["Zqxa Synthname", "Ovrel-Dax Quembly"]},
+        {"kind": "PII", "values": ["Brindle Okapo"]},
+    ]}))
+    return Scrubber(None, p)
+
+
+@pytest.mark.parametrize("written, matched, value, kind", [
+    ("ZqxaSynthname", "ZqxaSynthname", "Zqxa Synthname", "PERSON"),
+    ("zqxasynthname", "zqxasynthname", "Zqxa Synthname", "PERSON"),
+    ("ZQXASYNTHNAME-notes", "ZQXASYNTHNAME", "Zqxa Synthname", "PERSON"),
+    ("zqxa.synthname", "zqxa.synthname", "Zqxa Synthname", "PERSON"),
+    ("zqxa-synthname", "zqxa-synthname", "Zqxa Synthname", "PERSON"),
+    ("zqxa/synthname", "zqxa/synthname", "Zqxa Synthname", "PERSON"),
+    ("zqxa - synthname", "zqxa - synthname", "Zqxa Synthname", "PERSON"),
+    ("zqxasynthname_2026.txt", "zqxasynthname", "Zqxa Synthname", "PERSON"),
+    ("OvrelDaxQuembly", "OvrelDaxQuembly", "Ovrel-Dax Quembly", "PERSON"),
+    ("ovrel.dax.quembly", "ovrel.dax.quembly", "Ovrel-Dax Quembly", "PERSON"),
+    ("brindleokapo", "brindleokapo", "Brindle Okapo", "PII"),
+])
+def test_a_multi_word_term_run_together(run_together, vault, written, matched, value, kind):
+    text = f"see {written} today"
+    assert [(text[a:b], k, v) for a, b, k, v in run_together.terms.spans(text)] == [(matched, kind, value)], text
+    assert f"[{kind}-1]" in run_together.scrub(text, vault).text
+
+
+@pytest.mark.parametrize("text", ["xzqxasynthname", "zqxasynthname2", "zqxasynthnames", "9zqxasynthname",
+                                  "zqxasynth name", "synthnamezqxa", "ovreldax quemblyx"])
+def test_run_together_keeps_word_boundaries(run_together, text):
+    assert run_together.terms.spans(text) == [], text
+
+
+@pytest.mark.parametrize("written", ["Zqxa Synthname", "zqxa\nsynthname", "Synthname, Zqxa", "Zqxa R. Synthname",
+                                     "Ovrel-Dax Quembly", "Quembly, Ovrel-Dax"])
+def test_run_together_keeps_every_earlier_format(run_together, vault, written):
+    assert "[PERSON-" in run_together.scrub(f"signed {written}", vault).text, written
+
+
+@pytest.mark.parametrize("kind, value, expected", [
+    ("PERSON", "Zqxa", r"(?<![A-Za-z0-9])Zqxa(?![A-Za-z0-9])"),
+    ("PERSON", "Ovrel-Dax", r"(?<![A-Za-z0-9])Ovrel\-Dax(?![A-Za-z0-9])"),
+    ("PII", "Synthname", r"(?<![A-Za-z0-9])Synthname(?![A-Za-z0-9])"),
+])
+def test_a_single_word_term_is_unchanged(kind, value, expected):
+    from local_llm_mcp.scrub import term_pattern
+    assert term_pattern(kind, value) == expected
+
+
+@pytest.mark.parametrize("shape", [
+    "zqxa" * 25_000,                                   # the first word over and over, never the second
+    "zqxa-./" * 14_286,                                # the first word, then a full run of separators
+    "zqxa synthnam " * 7_143,                          # near misses: the second word one letter short
+    " -.()/" * 16_667,                                 # nothing but separators
+    "zqxa" + " " * 99_996,                             # one first word, then a single long whitespace run
+    "ovrel-dax-" * 10_000,                             # a word that holds a separator, repeated
+], ids=["first-word-repeated", "first-word-then-separators", "near-miss", "separators-only", "long-whitespace",
+        "split-word-repeated"])
+def test_run_together_matching_is_linear_on_adversarial_text(run_together, shape):
+    import time
+    text = shape[:100_000]
+    assert len(text) == 100_000
+    t0 = time.perf_counter()
+    spans = run_together.terms.spans(text)
+    elapsed = time.perf_counter() - t0
+    assert spans == [] and elapsed < 1.0, (elapsed, shape[:20])

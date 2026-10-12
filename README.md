@@ -636,10 +636,12 @@ write it once, any way:**
 | `EMAIL` | `name at domain dot com`, `name [at] domain [dot] com`, `name (at) …`, any case |
 | `ADDRESS` | written out or abbreviated (Street/St., Avenue/Ave, Apartment/Apt/Unit/#, North/N., Suite/Ste, …), commas and full stops optional, parts across line breaks |
 | `PERSON` | any spacing or line break between the parts, `Last, First`, a middle initial |
+| any value of two or more words, except an e-mail | its words run together, joined by nothing or by up to three spaces, dots, dashes, slashes or brackets: `Jane Example` also matches `JaneExample`, `janeexample`, `jane.example` and the name in `JANEEXAMPLE-notes`, but not `xjaneexample` or `janeexample2` |
 
 The vault records the value as you saved it, so a placeholder always restores to that form. Put the names,
 addresses and numbers of the people this deployment protects here; keep usernames and hostnames out
-(they appear in every path). This is the deterministic floor for identity that no
+(they appear in every path). A two-word name now also matches its run-together form, so a login name that is a
+saved name written together (`janeexample`) is masked wherever it appears, paths included. This is the deterministic floor for identity that no
 pattern can infer; the entity pass adds what the worker finds on top.
 
 ## Observers
