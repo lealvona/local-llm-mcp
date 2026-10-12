@@ -8,17 +8,27 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 - A term of two or more words (any kind except an e-mail) also matches its words joined by nothing or by up to
   three of the separators numbers already allow (spaces, dots, dashes, slashes, brackets) or underscores:
   `Jane Example` matches `JaneExample`, `janeexample`, `jane.example`, `jane_example` and the name in
-  `JANEEXAMPLE-notes`. It is still whole-word, so `xjaneexample` and `janeexample2` do not match, and every earlier
-  format still matches. An underscore joins words only and never separates the digits of a number. A single-word
-  term's pattern is unchanged. The words are cut on the joiners first, so no word contains one and matching stays
+  `JANEEXAMPLE-notes`. Term matching is still whole-word, so `xjaneexample` and `janeexample2` do not match, and
+  every earlier format still matches. Once a run-together form is in the session's vault, though, the scrub's
+  exact match of vault values (which has no word boundaries) masks it inside longer tokens for the rest of the
+  conversation: `janeexamplelaptop`, or `markdownlint` for a term `Mark Down`. An underscore joins words only and
+  never separates the digits of a number. A single-word term's pattern is unchanged. The words are cut on the joiners first, so no word contains one and matching stays
   linear; tests hold eleven 100,000-character adversarial texts, five of them underscore-heavy, under one second.
 - A run-together match restores exactly as written. Each run-together form gets its own vault entry and
   placeholder, so `/srv/janeexample/notes.txt`, `JaneExample/repo.git` or `jane.example-cv.pdf` comes back
   unchanged when the placeholder is reused in a command, rather than with the saved spaced name
-  (`/srv/Jane Example/notes.txt`). One person can therefore appear under more than one placeholder. Matches that are
-  not run together are byte-for-byte unchanged, including their placeholders and what those restore to.
+  (`/srv/Jane Example/notes.txt`). One person can therefore appear under more than one placeholder. Text that an
+  earlier format already matches is not a run-together match and still restores the saved form: words separated
+  only by whitespace (a tab, a line break), and an `ADDRESS` whose parts are joined by nothing, full stops or
+  commas (`12examplelane` restores as `12 Example Lane`).
+- A match that is not run together is still vaulted under the saved value and restores it as before. Its
+  placeholder NUMBER, and the disclosure counts, can shift, because a run-together form now also counts as a value
+  of its own where nothing matched before. In the server's order, `register_material` before the scrub, the name
+  inside `jane.example@example.org` is registered as an extra `PERSON` (`[PERSON-1]` = `jane.example`), so the
+  next person is `[PERSON-2]`, and the disclosure dialog reports one more name. Round trips stay exact.
 - A login name that is a saved name written together is now masked too, paths included. So is an ordinary word
-  that happens to be a two-word term's joined form (`Mark Down` masks `markdown`): this errs toward privacy.
+  that happens to be a two-word term's joined form (`Mark Down` masks `markdown`, and once vaulted `markdownlint`):
+  this errs toward privacy.
 
 ### Changed — private terms match in every common format
 - A phone number matches with any separators or none and with or without its country code; a numeric account or
