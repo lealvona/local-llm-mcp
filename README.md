@@ -636,11 +636,35 @@ write it once, any way:**
 | `EMAIL` | `name at domain dot com`, `name [at] domain [dot] com`, `name (at) …`, any case |
 | `ADDRESS` | written out or abbreviated (Street/St., Avenue/Ave, Apartment/Apt/Unit/#, North/N., Suite/Ste, …), commas and full stops optional, parts across line breaks |
 | `PERSON` | any spacing or line break between the parts, `Last, First`, a middle initial |
+| any value of two or more words, except an e-mail | its words run together, joined by nothing or by up to three spaces, dots, dashes, slashes, brackets or underscores: `Jane Example` also matches `JaneExample`, `janeexample`, `jane.example`, `jane_example` and the name in `JANEEXAMPLE-notes`, but not `xjaneexample` or `janeexample2`. An underscore joins words only; it never separates the digits of a number |
 
-The vault records the value as you saved it, so a placeholder always restores to that form. Put the names,
-addresses and numbers of the people this deployment protects here; keep usernames and hostnames out
-(they appear in every path). This is the deterministic floor for identity that no
-pattern can infer; the entity pass adds what the worker finds on top.
+The vault records the value as you saved it, so a placeholder restores to that form — except a run-together
+match: each run-together form gets its own placeholder, holding the text exactly as it was written, so
+`/srv/janeexample/notes.txt` comes back unchanged when the caller reuses the placeholder in a command. The cost is
+that the caller sees two placeholders (`[PERSON-1]` for `Jane Example`, `[PERSON-2]` for `janeexample`) for one
+person; each written form keeps its placeholder for the whole conversation.
+
+That exception covers only text the run-together form alone matches. Where a format from the table above already
+matches, it wins and the placeholder restores the saved form, exactly as before:
+
+- words separated only by whitespace — a tab, a line break, several spaces (`jane<TAB>example`) — restore as
+  `Jane Example`;
+- an `ADDRESS` whose parts are joined by nothing, full stops or commas (`12examplelane`, `12.example.lane`,
+  `12,example,lane`) restores as `12 Example Lane`, because the address format already allows those between its
+  parts. Joined by dashes, slashes, brackets or underscores (`12-example-lane`, `12_example_lane`), it is a
+  run-together match and restores exactly.
+
+Whole-word applies to matching a term. Once a run-together form is in the session's vault, the scrub also
+exact-matches every vault value wherever it appears, with no word boundaries, so later in that conversation it is
+masked inside longer tokens too: `janeexamplelaptop` becomes `[PERSON-2]laptop`.
+
+Put the names, addresses and numbers of the people this deployment protects here; keep usernames and hostnames
+out (they appear in every path). A two-word name also matches its run-together form, so a login name that is a
+saved name written together (`janeexample`) is masked wherever it appears, paths included. For the same reason a
+two-word term whose joined form is an ordinary word masks that word everywhere: a person saved as `Mark Down`
+masks every `markdown`, and once vaulted, `markdownlint` too. That errs toward privacy by design: an over-masked word costs the caller some clarity, a
+missed name leaks it. This is the deterministic floor for identity that no pattern can infer;
+the entity pass adds what the worker finds on top.
 
 ## Observers
 

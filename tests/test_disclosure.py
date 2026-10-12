@@ -102,4 +102,5 @@ def test_client_instructions_fit_and_mention_disclosure():
     for mode in ("pii", "assist"):
         t = prompts.client_instructions(mode, "m", "http://127.0.0.1:8000/v1")
         assert len(t) <= 2040 and t.endswith("material.") and "local_llm_disclosure" in t
+        assert "One person or value may have several, one per spelling." in t  # one placeholder per written form
     assert "asks the USER" in prompts.client_instructions("assist", "m", "http://127.0.0.1:8000/v1")
