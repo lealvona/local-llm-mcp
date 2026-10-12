@@ -6,12 +6,19 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ### Changed — a multi-word private term also matches with its words run together
 - A term of two or more words (any kind except an e-mail) also matches its words joined by nothing or by up to
-  three of the separators numbers already allow (spaces, dots, dashes, slashes, brackets): `Jane Example` matches
-  `JaneExample`, `janeexample`, `jane.example` and the name in `JANEEXAMPLE-notes`. It is still whole-word, so
-  `xjaneexample` and `janeexample2` do not match, and every earlier format still matches. A single-word term's
-  pattern is unchanged. The words are cut on the separators first, so no word contains one and matching stays
-  linear; a test holds 100,000 characters of adversarial text under one second.
-- A login name that is a saved name written together is now masked too, paths included.
+  three of the separators numbers already allow (spaces, dots, dashes, slashes, brackets) or underscores:
+  `Jane Example` matches `JaneExample`, `janeexample`, `jane.example`, `jane_example` and the name in
+  `JANEEXAMPLE-notes`. It is still whole-word, so `xjaneexample` and `janeexample2` do not match, and every earlier
+  format still matches. An underscore joins words only and never separates the digits of a number. A single-word
+  term's pattern is unchanged. The words are cut on the joiners first, so no word contains one and matching stays
+  linear; tests hold eleven 100,000-character adversarial texts, five of them underscore-heavy, under one second.
+- A run-together match restores exactly as written. Each run-together form gets its own vault entry and
+  placeholder, so `/srv/janeexample/notes.txt`, `JaneExample/repo.git` or `jane.example-cv.pdf` comes back
+  unchanged when the placeholder is reused in a command, rather than with the saved spaced name
+  (`/srv/Jane Example/notes.txt`). One person can therefore appear under more than one placeholder. Matches that are
+  not run together are byte-for-byte unchanged, including their placeholders and what those restore to.
+- A login name that is a saved name written together is now masked too, paths included. So is an ordinary word
+  that happens to be a two-word term's joined form (`Mark Down` masks `markdown`): this errs toward privacy.
 
 ### Changed — private terms match in every common format
 - A phone number matches with any separators or none and with or without its country code; a numeric account or

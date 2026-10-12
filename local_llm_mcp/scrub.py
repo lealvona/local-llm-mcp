@@ -449,8 +449,11 @@ class Rules:
 
 
 _SEP_CHAR = r"[\s.\-()/‐-―]"  # one character that may separate the parts of a written value
-_SEP = _SEP_CHAR + "{0,3}"  # what may sit between the digits of a written number, or between run-together words
-_WORD_SPLIT = re.compile("(?:" + _SEP_CHAR + "|,)+")  # what a value is cut into words on, so no word holds a separator
+_SEP = _SEP_CHAR + "{0,3}"  # what may sit between the digits of a written number
+_JOIN_CHAR = "(?:" + _SEP_CHAR + "|_)"  # between run-together words an underscore separates too (never between digits)
+_JOIN = _JOIN_CHAR + "{0,3}"  # what may sit between the words of a value written run together
+_WORD_SPLIT = re.compile("(?:" + _SEP_CHAR + "|[,_])+")  # what a value is cut into words on, so no word holds a joiner
+_JOINED = "joined"  # the named group a run-together match is reported through (see PrivateTerms.spans)
 _ADDR_WORDS = {  # each group is interchangeable in an address, written out or abbreviated
     w: g for g in (("street", "st"), ("avenue", "ave", "av"), ("road", "rd"), ("drive", "dr"), ("lane", "ln"),
                    ("boulevard", "blvd"), ("court", "ct"), ("place", "pl"), ("terrace", "ter", "terr"), ("circle", "cir"),
@@ -522,18 +525,20 @@ def _person_pattern(value: str) -> str:
 
 def _run_together_pattern(value: str) -> str | None:
     """A value of two or more words written with its words run together: joined by nothing or by up to three of
-    the separators in ``_SEP`` ("JaneDoe", "janedoe", "jane.doe", "jane - doe"), never inside a longer word.
+    the separators in ``_SEP`` or underscores ("JaneDoe", "janedoe", "jane.doe", "jane_doe", "jane - doe"), never
+    inside a longer word. Wrapped in the named group ``_JOINED`` so a match can tell it came from this form.
 
-    The words are cut on those separators and on commas, so no word contains a separator: between two words the
-    only choice is how many separators (0-3) to take before the next word's literal first character, which is not
-    a separator. Matching therefore stays linear in the text, with no nested or overlapping repetition to
-    backtrack through. Single-word values return None, so their pattern is exactly what it was."""
+    The words are cut on those joiners and on commas, so no word contains a joiner: between two words the only
+    choice is how many joiners (0-3) to take before the next word's literal first character, which is not a
+    joiner. Matching therefore stays linear in the text, with no nested or overlapping repetition to backtrack
+    through. Single-word values return None, so their pattern is exactly what it was."""
     if len(value.split()) < 2:
         return None
     words = [w for w in _WORD_SPLIT.split(value) if w]
     if len(words) < 2:
         return None
-    return r"(?<![A-Za-z0-9])" + _SEP.join(re.escape(w) for w in words) + r"(?![A-Za-z0-9])"
+    return (f"(?P<{_JOINED}>" + r"(?<![A-Za-z0-9])" + _JOIN.join(re.escape(w) for w in words)
+            + r"(?![A-Za-z0-9]))")
 
 
 def term_pattern(kind: str, value: str) -> str:
@@ -602,11 +607,16 @@ class PrivateTerms:
             log.warning("private terms file %s unreadable: %s", self.path, exc)
 
     def spans(self, text: str) -> list[tuple[int, int, str, str]]:
+        """(start, end, kind, value). The value is the term as saved, except for a run-together match
+        ("zqxasynthname" for "Zqxa Synthname"): that one reports the text exactly as written, so it gets its own
+        vault entry and its placeholder restores those very characters (a path, handle or file name must come back
+        unchanged when the placeholder is reused in a command)."""
         self.reload()
         out = []
         for kind, pat, value in self.items:
             for m in pat.finditer(text):
-                out.append((m.start(), m.end(), kind, value))
+                written = m.groupdict().get(_JOINED)
+                out.append((m.start(), m.end(), kind, written if written is not None else value))
         return out
 
 

@@ -341,8 +341,118 @@ def run_together(tmp_path):
 ])
 def test_a_multi_word_term_run_together(run_together, vault, written, matched, value, kind):
     text = f"see {written} today"
-    assert [(text[a:b], k, v) for a, b, k, v in run_together.terms.spans(text)] == [(matched, kind, value)], text
+    # a run-together match reports the text as written (its own vault entry), not the saved value
+    assert [(text[a:b], k, v) for a, b, k, v in run_together.terms.spans(text)] == [(matched, kind, matched)], text
+    assert matched != value
     assert f"[{kind}-1]" in run_together.scrub(text, vault).text
+
+
+@pytest.mark.parametrize("written", ["zqxa_synthname", "ZQXA_SYNTHNAME", "zqxa__synthname", "zqxa_-_synthname",
+                                     "ovrel_dax_quembly", "brindle_okapo"])
+def test_an_underscore_joins_run_together_words(run_together, written):
+    text = f"user {written} logged in"
+    assert [text[a:b] for a, b, _k, _v in run_together.terms.spans(text)] == [written], text
+
+
+def test_underscore_behaviour_is_pinned(run_together):
+    # at most three joiners, underscores included
+    assert run_together.terms.spans("zqxa____synthname") == []
+    # an underscore after the name is a boundary, not part of a longer word
+    assert [sp[3] for sp in run_together.terms.spans("zqxa_synthname_notes")] == ["zqxa_synthname"]
+
+
+def test_an_underscore_never_separates_digits(any_format):
+    # an underscore joins words only: it is not in _SEP, so it never separates the digits of a number
+    assert not [sp for sp in any_format.terms.spans("ref 555_010_0222") if sp[2] == "PHONE"]
+    assert not [sp for sp in any_format.terms.spans("ref 4400_1234_5678") if sp[2] == "ACCOUNT"]
+
+
+@pytest.fixture
+def joined_kinds(tmp_path):
+    p = tmp_path / "terms.json"
+    p.write_text(json.dumps({"terms": [
+        {"kind": "ADDRESS", "values": ["12 Zqxa Lane"]},
+        {"kind": "SSN", "values": ["000 12 3456"]},
+        {"kind": "ID", "values": ["QX 7781 22"]},
+        {"kind": "ACCOUNT", "values": ["AB12 CD34 EF56"]},
+        {"kind": "EMAIL", "values": ["zqxa.synthname@example.org"]},
+    ]}))
+    return Scrubber(None, p)
+
+
+@pytest.mark.parametrize("written, kind", [
+    ("12-zqxa-lane", "ADDRESS"), ("12_Zqxa_Lane", "ADDRESS"), ("12/zqxa/lane", "ADDRESS"),
+    ("000123456", "SSN"), ("000-12-3456", "SSN"), ("000_12_3456", "SSN"),
+    ("qx778122", "ID"), ("QX-7781-22", "ID"), ("qx_7781_22", "ID"),
+    ("ab12cd34ef56", "ACCOUNT"), ("AB12-CD34-EF56", "ACCOUNT"), ("ab12_cd34_ef56", "ACCOUNT"),
+])
+def test_run_together_for_other_kinds(joined_kinds, vault, written, kind):
+    text = f"on file: {written}."
+    assert [(text[a:b], k) for a, b, k, _v in joined_kinds.terms.spans(text)] == [(written, kind)], text
+    r = joined_kinds.scrub(text, vault)
+    assert written not in r.text and vault.rehydrate(r.text) == text
+
+
+@pytest.mark.parametrize("text", ["0001234567", "1000123456", "qx7781221", "xab12cd34ef56"])
+def test_run_together_for_other_kinds_keeps_boundaries(joined_kinds, text):
+    assert joined_kinds.terms.spans(text) == [], text
+
+
+def test_an_email_gets_no_run_together_form(joined_kinds):
+    from local_llm_mcp.scrub import term_pattern
+    assert "(?P<" not in term_pattern("EMAIL", "zqxa.synthname@example.org")
+    assert "(?P<" not in term_pattern("PII", "zqxa synthname@example.org")
+    assert joined_kinds.terms.spans("zqxasynthnameexampleorg and zqxa_synthname_example_org") == []
+
+
+# ---- a run-together match survives the round trip: the placeholder restores the text exactly as written --------
+
+@pytest.mark.parametrize("text", [
+    "cat /home/zqxasynthname/notes.txt",                    # a path  # public:allow home directory path
+    "git clone ZqxaSynthname/repo.git",                     # a repository
+    "open zqxa.synthname-cv.pdf",                           # a file name
+    "see https://example.org/u/zqxa_synthname/profile",     # a URL
+    "ping @zqxa_synthname or @ZQXASYNTHNAME",               # handles, two forms in one text
+    "mv ovrel.dax.quembly.txt OvrelDaxQuembly/",            # a split word, two forms
+    "cp brindle-okapo.cfg /srv/brindleokapo/",              # PII kind
+])
+def test_a_run_together_match_round_trips_exactly(run_together, vault, text):
+    r = run_together.scrub(text, vault)
+    for name in ("synthname", "quembly", "okapo"):
+        assert name not in r.text.lower(), r.text
+    assert vault.rehydrate(r.text) == text
+
+
+def test_each_written_form_keeps_one_placeholder_for_the_conversation(run_together, vault):
+    first = run_together.scrub("Zqxa Synthname owns /home/zqxasynthname and ZqxaSynthname/repo", vault).text  # public:allow home directory path
+    again = run_together.scrub("again: ZqxaSynthname/repo, /home/zqxasynthname, Synthname, Zqxa", vault).text  # public:allow home directory path
+    assert first == "[PERSON-1] owns /home/[PERSON-2] and [PERSON-3]/repo"
+    assert again == "again: [PERSON-3]/repo, /home/[PERSON-2], [PERSON-1]"
+    assert [vault.by_placeholder[f"[PERSON-{n}]"]["value"] for n in (1, 2, 3)] == \
+        ["Zqxa Synthname", "zqxasynthname", "ZqxaSynthname"]
+
+
+# Measured on main (2130c6d) before this change: a match that is not run together restores the term AS SAVED (README,
+# "Private terms"). That is unchanged, byte for byte: these pin it, and the saved form round-trips exactly.
+@pytest.mark.parametrize("text, restored", [
+    ("signed Robin Example", "signed Robin Example"),
+    ("signed Example, Robin", "signed Robin Example"),
+    ("signed ROBIN EXAMPLE", "signed Robin Example"),
+    ("signed Robin J. Example", "signed Robin Example"),
+    ("Ship to: 12 North Example Street, Apt 4B", "Ship to: 12 North Example Street, Apt 4B"),
+    ("Ship to: 12 N. Example St. Apt 4B", "Ship to: 12 North Example Street, Apt 4B"),
+    ("call me on 555-010-0222 tonight", "call me on 555-010-0222 tonight"),
+    ("call me on (555) 010-0222 tonight", "call me on (555) 010-0222 tonight"),
+    ("call me on 001 555 010 0222 tonight", "call me on 555-010-0222 tonight"),
+    ("acct 4400 1234 5678.", "acct 4400 1234 5678."),
+    ("acct 4400-1234-5678.", "acct 4400 1234 5678."),
+    ("write to robin.example@example.org please", "write to robin.example@example.org please"),
+    ("write to robin.example at example dot org please", "write to robin.example@example.org please"),
+])
+def test_a_match_that_is_not_run_together_restores_as_before(any_format, vault, text, restored):
+    r = any_format.scrub(text, vault)
+    assert "Example" not in r.text.split(" ", 1)[1] and "0222" not in r.text and "5678" not in r.text
+    assert vault.rehydrate(r.text) == restored
 
 
 @pytest.mark.parametrize("text", ["xzqxasynthname", "zqxasynthname2", "zqxasynthnames", "9zqxasynthname",
@@ -374,8 +484,14 @@ def test_a_single_word_term_is_unchanged(kind, value, expected):
     " -.()/" * 16_667,                                 # nothing but separators
     "zqxa" + " " * 99_996,                             # one first word, then a single long whitespace run
     "ovrel-dax-" * 10_000,                             # a word that holds a separator, repeated
+    "_" * 100_000,                                     # nothing but underscores
+    "zqxa___" * 14_286,                                # the first word, then a full run of underscores
+    "zqxa_synthnam_" * 7_143,                          # underscore-joined near misses
+    "zqxa_-_._/_" * 9_091,                             # the first word, then underscores mixed with separators
+    "ovrel_dax_" * 10_000,                             # a word split on an underscore, repeated
 ], ids=["first-word-repeated", "first-word-then-separators", "near-miss", "separators-only", "long-whitespace",
-        "split-word-repeated"])
+        "split-word-repeated", "underscores-only", "first-word-then-underscores", "underscore-near-miss",
+        "underscores-and-separators", "underscore-split-word-repeated"])
 def test_run_together_matching_is_linear_on_adversarial_text(run_together, shape):
     import time
     text = shape[:100_000]

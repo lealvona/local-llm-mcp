@@ -636,13 +636,21 @@ write it once, any way:**
 | `EMAIL` | `name at domain dot com`, `name [at] domain [dot] com`, `name (at) …`, any case |
 | `ADDRESS` | written out or abbreviated (Street/St., Avenue/Ave, Apartment/Apt/Unit/#, North/N., Suite/Ste, …), commas and full stops optional, parts across line breaks |
 | `PERSON` | any spacing or line break between the parts, `Last, First`, a middle initial |
-| any value of two or more words, except an e-mail | its words run together, joined by nothing or by up to three spaces, dots, dashes, slashes or brackets: `Jane Example` also matches `JaneExample`, `janeexample`, `jane.example` and the name in `JANEEXAMPLE-notes`, but not `xjaneexample` or `janeexample2` |
+| any value of two or more words, except an e-mail | its words run together, joined by nothing or by up to three spaces, dots, dashes, slashes, brackets or underscores: `Jane Example` also matches `JaneExample`, `janeexample`, `jane.example`, `jane_example` and the name in `JANEEXAMPLE-notes`, but not `xjaneexample` or `janeexample2`. An underscore joins words only; it never separates the digits of a number |
 
-The vault records the value as you saved it, so a placeholder always restores to that form. Put the names,
-addresses and numbers of the people this deployment protects here; keep usernames and hostnames out
-(they appear in every path). A two-word name now also matches its run-together form, so a login name that is a
-saved name written together (`janeexample`) is masked wherever it appears, paths included. This is the deterministic floor for identity that no
-pattern can infer; the entity pass adds what the worker finds on top.
+The vault records the value as you saved it, so a placeholder restores to that form — except a run-together
+match: each run-together form gets its own placeholder, holding the text exactly as it was written, so
+`/srv/janeexample/notes.txt` comes back unchanged when the caller reuses the placeholder in a command. The cost is
+that the caller sees two placeholders (`[PERSON-1]` for `Jane Example`, `[PERSON-2]` for `janeexample`) for one
+person; each written form keeps its placeholder for the whole conversation.
+
+Put the names, addresses and numbers of the people this deployment protects here; keep usernames and hostnames
+out (they appear in every path). A two-word name also matches its run-together form, so a login name that is a
+saved name written together (`janeexample`) is masked wherever it appears, paths included. For the same reason a
+two-word term whose joined form is an ordinary word masks that word everywhere: a person saved as `Mark Down`
+masks every `markdown`. That errs toward privacy by design: an over-masked word costs the caller some clarity, a
+missed name leaks it. This is the deterministic floor for identity that no pattern can infer;
+the entity pass adds what the worker finds on top.
 
 ## Observers
 
