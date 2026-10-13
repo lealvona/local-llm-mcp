@@ -5,14 +5,15 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 ## Unreleased
 
 ### Changed — price table refreshed from the providers' own pages (2026-10-13)
-- `prices.json` re-read from every provider's current pricing page, 34 → 47 rows, all dated 2026-10-13. Value
+- `prices.json` re-read from every provider's current pricing page, 34 → 57 rows, all dated 2026-10-13. Value
   changes: OpenAI now publishes cache-write prices for the astra/sol/terra/luna line; Kimi K3 publishes a cache-write
   price; Mistral publishes cached-input prices and its pricing page moved to `docs.mistral.ai`; `deepseek-v4-flash` is
   a retired name billed at the cheaper `deepseek-flash` (V4.1 Flash) price; `gemini-3.5-flash` is retired and routes to
   `gemini-3.6-flash`. Retired or legacy rows are kept and say so in `context_note` (Nova Premier past EOL, Llama 4 on
   Bedrock legacy). Added the newer models each provider lists: Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5, GPT-6.1 Sol,
   GPT-6 Sol, GPT-6 Luna, Gemini 4 Argon, Gemini 3.6 Flash, Grok 4.7, DeepSeek V4.1 Flash, Kimi K2.7 Code, GLM-5.3-Flash,
-  Mistral Large 4. Bedrock values come from AWS's own Price List API offer file (the pricing page renders client-side).
+  Mistral Large 4, and the other models the pages list: Claude Fable 5, Mythos 5 and Opus 4.8, GPT-5.4 Pro, Gemini 3.1
+  Flash-Lite, Grok 4.20, Kimi K2.7 Code highspeed, GLM-5.3-FlashX, MiniMax-M2.7, Llama 4 Scout. Bedrock values come from AWS's own Price List API offer file (the pricing page renders client-side).
   The headline `caller_model` assumption is unchanged (`claude-opus-5`).
 
 ### Changed — a multi-word private term also matches with its words run together
