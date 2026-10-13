@@ -104,7 +104,7 @@ def test_traversal_and_bad_keys_refused(server):
     assert call(server, "GET", "/api/nothing")[0] == 404
 
 
-def test_savings_and_prices_api(server):
+def test_savings_and_prices_api(frozen_clock, server):
     code, d = call(server, "GET", "/api/savings")
     assert code == 200 and d["all_time"]["turns"] == 3 and d["all_time"]["sessions"] == 3
     assert d["all_time"]["avoided_input"] == 9500 + 950 and d["all_time"]["avoided_output"] == 200  # 3.8 chars/token + one measured

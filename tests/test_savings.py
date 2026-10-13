@@ -103,7 +103,7 @@ def test_ledger_reprices_history_with_current_assumptions(tmp_path):
     assert t2["avoided_input"] == 19000 and t2["carried"] == 0
 
 
-def test_report_shape(tmp_path):
+def test_report_shape(frozen_clock, tmp_path):
     pr = prices(tmp_path, {"assumptions": ASSUME, "models": MODELS})
     led = sv.Ledger(tmp_path / "savings.jsonl")
     led.append("other", {"kind": "run", "gathered_chars": 4000, "out_chars": 400})
@@ -167,7 +167,7 @@ def test_ledger_keeps_measured_counts_and_nulls(tmp_path):
     assert r1["gathered_tokens"] == 10 and r1["returned_tokens"] is None and "gathered_tokens" not in r2
 
 
-def test_price_staleness(tmp_path):
+def test_price_staleness(frozen_clock, tmp_path):
     p = tmp_path / "prices.json"
     p.write_text(json.dumps({"checked": "2020-01-01", "assumptions": {"stale_after_days": 30}, "models": MODELS}))
     pr = sv.Prices(p)
@@ -176,7 +176,7 @@ def test_price_staleness(tmp_path):
     assert not pr.stale()
     p.write_text(json.dumps({"checked": "not a date", "models": MODELS}))
     assert pr.age_days() is None and pr.stale()  # unreadable date reads as stale
-    assert not sv.Prices(None).stale()  # the package defaults are fresh on the day they ship
+    assert not sv.Prices(None).stale()  # the package defaults are fresh on the day they were checked (clock frozen there)
 
 
 def test_tokenizer_factor_scales_cost_per_model(tmp_path):
