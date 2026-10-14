@@ -1,6 +1,9 @@
 """Scrubber, vault, rules-file and dotenv contracts. Self-contained: built-in rules only."""
+import asyncio
 import json
 import os
+import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -308,10 +311,11 @@ def test_near_misses_are_not_the_terms(any_format):
     assert any_format.terms.spans(text) == []
 
 
-def test_a_match_reports_the_value_as_saved_and_takes_the_whole_number(any_format):
+def test_a_match_reports_the_value_as_written_and_takes_the_whole_number(any_format):
     text = "call (555) 010-0222 now"
     [(a, b, kind, value)] = [sp for sp in any_format.terms.spans(text) if sp[2] == "PHONE"]
-    assert value == "555-010-0222" and text[a:b] == "(555) 010-0222"
+    assert value == text[a:b] == "(555) 010-0222"
+    assert any_format.terms.saved_form("PHONE", value) == "555-010-0222"
 
 
 # ---- a multi-word term also matches with its words run together ---------------------------------------------
@@ -341,7 +345,7 @@ def run_together(tmp_path):
 ])
 def test_a_multi_word_term_run_together(run_together, vault, written, matched, value, kind):
     text = f"see {written} today"
-    # a run-together match reports the text as written (its own vault entry), not the saved value
+    # a match reports the text as written (its own vault entry), not the saved value
     assert [(text[a:b], k, v) for a, b, k, v in run_together.terms.spans(text)] == [(matched, kind, matched)], text
     assert matched != value
     assert f"[{kind}-1]" in run_together.scrub(text, vault).text
@@ -399,9 +403,9 @@ def test_run_together_for_other_kinds_keeps_boundaries(joined_kinds, text):
 
 
 def test_an_email_gets_no_run_together_form(joined_kinds):
-    from local_llm_mcp.scrub import term_pattern
-    assert "(?P<" not in term_pattern("EMAIL", "zqxa.synthname@example.org")
-    assert "(?P<" not in term_pattern("PII", "zqxa synthname@example.org")
+    from local_llm_mcp.scrub import _run_together_pattern, term_pattern
+    joined = _run_together_pattern("zqxa synthname@example.org")
+    assert joined and joined not in term_pattern("PII", "zqxa synthname@example.org")
     assert joined_kinds.terms.spans("zqxasynthnameexampleorg and zqxa_synthname_example_org") == []
 
 
@@ -426,33 +430,112 @@ def test_a_run_together_match_round_trips_exactly(run_together, vault, text):
 def test_each_written_form_keeps_one_placeholder_for_the_conversation(run_together, vault):
     first = run_together.scrub("Zqxa Synthname owns /home/zqxasynthname and ZqxaSynthname/repo", vault).text  # public:allow home directory path
     again = run_together.scrub("again: ZqxaSynthname/repo, /home/zqxasynthname, Synthname, Zqxa", vault).text  # public:allow home directory path
-    assert first == "[PERSON-1] owns /home/[PERSON-2] and [PERSON-3]/repo"
-    assert again == "again: [PERSON-3]/repo, /home/[PERSON-2], [PERSON-1]"
-    assert [vault.by_placeholder[f"[PERSON-{n}]"]["value"] for n in (1, 2, 3)] == \
-        ["Zqxa Synthname", "zqxasynthname", "ZqxaSynthname"]
+    assert first == "[PERSON-1] owns /home/[PERSON-1.2] and [PERSON-1.3]/repo"
+    assert again == "again: [PERSON-1.3]/repo, /home/[PERSON-1.2], [PERSON-1.4]"
+    assert [vault.by_placeholder[ph]["value"] for ph in ("[PERSON-1]", "[PERSON-1.2]", "[PERSON-1.3]", "[PERSON-1.4]")] \
+        == ["Zqxa Synthname", "zqxasynthname", "ZqxaSynthname", "Synthname, Zqxa"]
+    assert run_together.scrub("Ovrel-Dax Quembly", vault).text == "[PERSON-2]"  # the next person, next number
 
 
-# Measured on main (2130c6d) before this change: a match that is not run together restores the term AS SAVED (README,
-# "Private terms"). That is unchanged, byte for byte: these pin it, and the saved form round-trips exactly.
-@pytest.mark.parametrize("text, restored", [
-    ("signed Robin Example", "signed Robin Example"),
-    ("signed Example, Robin", "signed Robin Example"),
-    ("signed ROBIN EXAMPLE", "signed Robin Example"),
-    ("signed Robin J. Example", "signed Robin Example"),
-    ("Ship to: 12 North Example Street, Apt 4B", "Ship to: 12 North Example Street, Apt 4B"),
-    ("Ship to: 12 N. Example St. Apt 4B", "Ship to: 12 North Example Street, Apt 4B"),
-    ("call me on 555-010-0222 tonight", "call me on 555-010-0222 tonight"),
-    ("call me on (555) 010-0222 tonight", "call me on (555) 010-0222 tonight"),
-    ("call me on 001 555 010 0222 tonight", "call me on 555-010-0222 tonight"),
-    ("acct 4400 1234 5678.", "acct 4400 1234 5678."),
-    ("acct 4400-1234-5678.", "acct 4400 1234 5678."),
-    ("write to robin.example@example.org please", "write to robin.example@example.org please"),
-    ("write to robin.example at example dot org please", "write to robin.example@example.org please"),
+# ---- every written form of a private term restores exactly as written ------------------------------------------
+# Measured on main (b03f3c2) by the review of PR #10: these restored the term AS SAVED ("Example, Robin" came back as
+# "Robin Example", "4400-1234-5678" as "4400 1234 5678"), which changed what a reused placeholder did in a command.
+
+@pytest.mark.parametrize("text", [
+    # names: order, case, spacing, a line break, a middle initial
+    "signed Robin Example", "signed Example, Robin", "signed Example ,Robin", "signed ROBIN EXAMPLE",
+    "signed robin example", "signed Robin J. Example", "signed Robin J Example", "signed Robin  Example",
+    "signed Robin\nExample",
+    # addresses: abbreviated, and run together with nothing, full stops or commas
+    "Ship to: 12 North Example Street, Apt 4B", "Ship to: 12 N. Example St. Apt 4B", "Ship to: 12 N Example St, #4B",
+    "Ship to: 12 north example street apartment 4b", "Ship to: 12 North Example St\nApt 4B",
+    "Ship to: 12 N Example St Unit 4B", "Ship to: 12northexamplestreetapt4b", "Ship to: 12.North.Example.Street.Apt.4B",
+    "Ship to: 12,North,Example,Street,Apt,4B",
+    # phones: with and without a country-code prefix, any grouping
+    "call 555-010-0222 tonight", "call 001 555 010 0222 tonight", "call +1 555 010 0222 tonight",
+    "call 1 (555) 010-0222 tonight", "call (555) 010-0222 tonight", "call 5550100222 tonight",
+    "call 555–010–0222 tonight", "office +44 20 7946 0958", "office 0044 20 7946 0958", "office +442079460958",
+    "office +44 (20) 7946-0958", "office 44 20 7946 0958", "office:442079460958",
+    # account numbers: any grouping
+    "acct 4400 1234 5678.", "acct 4400-1234-5678.", "acct 440012345678.", "acct 4400.1234.5678.",
+    "ACCT=4400-1234-5678",
+    # e-mails in their usual disguises
+    "write to robin.example@example.org please", "write to robin.example at example dot org please",
+    "write to robin.example [at] example [dot] org please", "write to robin.example(at)example(dot)org please",
+    "write to ROBIN.EXAMPLE@EXAMPLE.ORG please", "write to mailto:robin.example@example.org please",  # public:allow non-example email address
 ])
-def test_a_match_that_is_not_run_together_restores_as_before(any_format, vault, text, restored):
+def test_every_written_form_round_trips_exactly(any_format, vault, text):
     r = any_format.scrub(text, vault)
-    assert "Example" not in r.text.split(" ", 1)[1] and "0222" not in r.text and "5678" not in r.text
-    assert vault.rehydrate(r.text) == restored
+    for private in ("robin", "example", "0222", "0958", "7946", "5678"):
+        assert private not in r.text.lower(), (text, r.text)
+    assert vault.rehydrate(r.text) == text, r.text
+
+
+def test_the_spellings_of_one_value_share_its_number(any_format, vault):
+    text = "Example, Robin wrote; Robin Example replied; ROBIN EXAMPLE and robinexample signed"
+    r = any_format.scrub(text, vault)
+    assert r.text == "[PERSON-1] wrote; [PERSON-1.2] replied; [PERSON-1.3] and [PERSON-1.4] signed"
+    assert vault.rehydrate(r.text) == text
+    assert vault.by_placeholder["[PERSON-1.3]"] == {"kind": "PERSON", "value": "ROBIN EXAMPLE", "term": "Robin Example"}
+    assert vault.counts() == {"PERSON": 1}  # one person, four spellings
+
+
+def test_disclosure_counts_values_not_spellings(any_format, vault, tmp_path):
+    from local_llm_mcp.scrub import Policy
+    material = "Example, Robin; Robin Example; robinexample; acct 4400-1234-5678 and 440012345678"
+    counts = any_format.register_material(material, vault, policy=Policy.register(entropy=False))
+    assert counts == {"PERSON": 1, "ACCOUNT": 1}
+    # the name inside an e-mail address is that person, not another one
+    mail = "From: robin.example@example.org (Robin Example)"
+    assert any_format.register_material(mail, Vault(tmp_path / "mail.json"), policy=Policy.register(entropy=False)) \
+        == {"EMAIL": 1, "PERSON": 1}
+
+
+def test_spelling_numbers_survive_a_reload(run_together, tmp_path):
+    run_together.scrub("Zqxa Synthname, zqxasynthname", Vault(tmp_path / "v.json"))
+    again = Vault(tmp_path / "v.json")
+    assert run_together.scrub("ZQXA SYNTHNAME and Ovrel-Dax Quembly", again).text == "[PERSON-1.3] and [PERSON-2]"
+
+
+def test_a_vault_from_before_spellings_had_numbers_keeps_its_entries(any_format, tmp_path):
+    p = tmp_path / "v.json"
+    p.write_text(json.dumps({"placeholders": {"[PERSON-1]": {"kind": "PERSON", "value": "Robin Example"},
+                                              "[PERSON-2]": {"kind": "PERSON", "value": "robinexample"}}}))
+    v = Vault(p)
+    r = any_format.scrub("Example, Robin, Robin Example, robinexample", v)
+    assert r.text == "[PERSON-1.2], [PERSON-1], [PERSON-2]"  # the saved value's entry takes the new spelling
+    assert v.rehydrate(r.text) == "Example, Robin, Robin Example, robinexample"
+
+
+def test_a_spelling_placeholder_is_a_placeholder(scrubber, vault):
+    assert PLACEHOLDER_RE.fullmatch("[PERSON-1.2]")
+    assert scrubber.scrub("[PERSON-[PERSON-1.2]] said hi", vault).text == "[PERSON-1.2] said hi"
+    assert vault.rehydrate("keep [PERSON-1.9] and [PERSON-1.]") == "keep [PERSON-1.9] and [PERSON-1.]"
+
+
+# The reviewer's measurements, run through the server's own shell runner: the command the caller writes with a
+# placeholder must do what the original command did.
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the shell runner needs bash")
+@pytest.mark.parametrize("command, expected", [
+    ("grep -c '4400-1234-5678' ledger.csv", "1"),                  # was 0: a silent wrong answer
+    ("printf '<%s>' ACCT=4400-1234-5678", "<ACCT=4400-1234-5678>"),  # was <ACCT=4400><1234><5678>
+    ("wc -l Example,Robin", "2 Example,Robin"),                     # was wc -l Robin Example: another file read
+    ("cat 'Robin  Example.txt'", "double-spaced"),
+])
+def test_a_reused_placeholder_runs_the_command_as_written(any_format, vault, tmp_path, command, expected):
+    from local_llm_mcp.material import run_command
+
+    def run(cmd: str) -> str:
+        return asyncio.run(run_command(cmd, cwd=str(tmp_path), timeout=30, max_chars=10_000)).output.strip()
+
+    (tmp_path / "ledger.csv").write_text("4400-1234-5678,12.00\n")
+    (tmp_path / "Example,Robin").write_text("one\ntwo\n")
+    (tmp_path / "Robin").write_text("an unrelated file\n" * 5)
+    (tmp_path / "Robin  Example.txt").write_text("double-spaced\n")
+    scrubbed = any_format.scrub(command, vault).text
+    assert "Robin" not in scrubbed and "5678" not in scrubbed, scrubbed
+    assert run(command) == expected
+    assert run(vault.rehydrate(scrubbed)) == expected
 
 
 @pytest.mark.parametrize("text", ["xzqxasynthname", "zqxasynthname2", "zqxasynthnames", "9zqxasynthname",
@@ -500,3 +583,61 @@ def test_run_together_matching_is_linear_on_adversarial_text(run_together, shape
     spans = run_together.terms.spans(text)
     elapsed = time.perf_counter() - t0
     assert spans == [] and elapsed < 1.0, (elapsed, shape[:20])
+
+
+# ---- term matching and rehydration stay linear on 1 MB of adversarial text --------------------------------------
+
+def _repeat(unit: str, n: int) -> str:
+    return (unit * (n // len(unit) + 1))[:n]
+
+
+_ADVERSARIAL = {  # every shape matches nothing, so all the work is failed attempts
+    "email-local-then-spaces": lambda n: ("qelvo.tarnish" + " " * n)[:n],  # was quadratic: 4.6 s at 20 KB on main
+    "email-local-at-then-spaces": lambda n: ("qelvo.tarnish at" + " " * n)[:n],
+    "email-disguises-repeated": lambda n: _repeat("qelvo.tarnish (at) example (dot) ", n),
+    "name-first-then-spaces": lambda n: ("Robin" + " " * n)[:n],
+    "name-last-comma-then-spaces": lambda n: ("Example," + " " * n)[:n],
+    "name-first-initial-repeated": lambda n: _repeat("Robin J. ", n),
+    "address-number-then-separators": lambda n: ("12" + _repeat(",. ", n))[:n],
+    "address-words-repeated": lambda n: _repeat("12 north example st apt ", n),
+    "phone-digits-then-separators": lambda n: ("555" + _repeat(" -.", n))[:n],
+    "phone-prefix-then-separators": lambda n: ("+" + _repeat(" (", n))[:n],
+    "account-groups-repeated": lambda n: _repeat("4400 1234 ", n),
+    "run-together-near-miss": lambda n: _repeat("zqxa_synthnam ", n),
+    "placeholder-prefixes": lambda n: _repeat("[PERSON-1.", n),
+}
+
+
+@pytest.fixture
+def every_format(tmp_path):
+    p = tmp_path / "every.json"
+    p.write_text(json.dumps({"terms": [
+        {"kind": "PHONE", "values": ["555-010-0222", "+44 20 7946 0958"]},
+        {"kind": "ACCOUNT", "values": ["4400 1234 5678"]},
+        {"kind": "EMAIL", "values": ["qelvo.tarnish@example.org"]},  # a local part that is no name's run-together form
+        {"kind": "ADDRESS", "values": ["12 North Example Street, Apt 4B"]},
+        {"kind": "PERSON", "values": ["Robin Example", "Zqxa Synthname", "Ovrel-Dax Quembly"]},
+    ]}))
+    return Scrubber(None, p)
+
+
+@pytest.mark.parametrize("shape", list(_ADVERSARIAL))
+def test_term_matching_and_rehydration_are_linear_on_1mb(every_format, tmp_path, shape):
+    vault = Vault(tmp_path / "v.json")
+    for written in ("Robin Example", "robinexample", "Example, Robin"):
+        vault.placeholder_for("PERSON", written, term="Robin Example")
+
+    def cost(n: int) -> tuple[float, list]:
+        text = _ADVERSARIAL[shape](n)
+        assert len(text) == n
+        t0 = time.perf_counter()
+        spans = every_format.terms.spans(text)
+        vault.rehydrate(text)
+        return time.perf_counter() - t0, spans
+
+    small, spans = cost(16_000)  # fail fast: a quadratic shape already takes seconds at this size
+    assert spans == [] and small < 0.5, (shape, small)
+    half, _ = cost(500_000)
+    full, spans = cost(1_000_000)
+    assert spans == [] and full < 10.0, (shape, full)
+    assert full < 3 * half + 0.05, (shape, half, full)  # linear doubles; quadratic would quadruple
