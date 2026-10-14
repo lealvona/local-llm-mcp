@@ -38,9 +38,10 @@ from typing import Iterable
 
 log = logging.getLogger("local_llm_mcp.scrub")
 
-PLACEHOLDER_RE = re.compile(r"\[(?P<kind>[A-Z]+)-(?P<n>\d+)\]")
+# "[PERSON-1.2]" is the second written form of the value behind "[PERSON-1]" (see Vault).
+PLACEHOLDER_RE = re.compile(r"\[(?P<kind>[A-Z]+)-(?P<n>\d+)(?:\.(?P<form>\d+))?\]")
 # A worker sometimes writes "[CARD-<the digits>]"; masking the digits then yields "[CARD-[CARD-1]]".
-_NESTED_PLACEHOLDER_RE = re.compile(r"\[([A-Z]+)-(\[(?:[A-Z]+)-\d+\])\]")
+_NESTED_PLACEHOLDER_RE = re.compile(r"\[([A-Z]+)-(\[(?:[A-Z]+)-\d+(?:\.\d+)?\])\]")
 KINDS = ("PERSON", "ADDRESS", "PHONE", "EMAIL", "SSN", "CARD", "ACCOUNT", "DOB", "ID", "SECRET", "PII")
 
 # Disclosure tiers: what a caller may be allowed to see in clear (see disclosure.py).
@@ -453,7 +454,6 @@ _SEP = _SEP_CHAR + "{0,3}"  # what may sit between the digits of a written numbe
 _JOIN_CHAR = "(?:" + _SEP_CHAR + "|_)"  # between run-together words an underscore separates too (never between digits)
 _JOIN = _JOIN_CHAR + "{0,3}"  # what may sit between the words of a value written run together
 _WORD_SPLIT = re.compile("(?:" + _SEP_CHAR + "|[,_])+")  # what a value is cut into words on, so no word holds a joiner
-_JOINED = "joined"  # the named group a run-together match is reported through (see PrivateTerms.spans)
 _ADDR_WORDS = {  # each group is interchangeable in an address, written out or abbreviated
     w: g for g in (("street", "st"), ("avenue", "ave", "av"), ("road", "rd"), ("drive", "dr"), ("lane", "ln"),
                    ("boulevard", "blvd"), ("court", "ct"), ("place", "pl"), ("terrace", "ter", "terr"), ("circle", "cir"),
@@ -474,14 +474,14 @@ def _phone_pattern(value: str) -> str | None:
     if not 7 <= len(digits) <= 15 or re.search(r"[^\d\s.\-()+/‐-―]", value):
         return None
     alts = [_digits_pattern(digits)]
-    cc = r"(?:\+|00)?"
+    cc = r"(?:(?:\+|00)" + _SEP + ")?"  # separators only after a prefix, so a match never starts on one
     if len(digits) == 11 and digits[0] == "1":            # +1 NANP written with its country code
         alts.append(_digits_pattern(digits[1:]))
-        alts[0] = cc + _SEP + alts[0]
+        alts[0] = cc + alts[0]
     elif len(digits) == 10:                               # NANP written without one: also match +1 / 1 / 001
         alts.append(r"(?:\+|00)?1" + _SEP + _digits_pattern(digits))
     elif value.lstrip().startswith(("+", "00")):          # international: with or without the + / 00 prefix
-        alts[0] = cc + _SEP + _digits_pattern(digits.removeprefix("00") if value.lstrip().startswith("00") else digits)
+        alts[0] = cc + _digits_pattern(digits.removeprefix("00") if value.lstrip().startswith("00") else digits)
     # never part of a longer number on either side
     return r"(?<![\d+(])\(?(?:" + "|".join(alts) + r")(?![\s.\-]?\d)"  # a leading "(" belongs to the number
 
@@ -490,7 +490,9 @@ def _email_pattern(value: str) -> str | None:
     m = re.fullmatch(r"([^@\s]+)@([^@\s]+\.[^@\s]+)", value)
     if not m:
         return None
-    at = r"\s*(?:@|\(at\)|\[at\]|\{at\}|<at>|\s+at\s+)\s*"
+    # " at " is its own alternative, not inside \s*…\s*: a whitespace run then has one way to be split, so a long
+    # one after the local part costs linear time, not quadratic (4.6 s at 20 KB before; tests/test_scrub.py)
+    at = r"(?:\s*(?:@|\(at\)|\[at\]|\{at\}|<at>)\s*|\s+at\s+)"
     dot = r"(?:\.|\s*(?:\(dot\)|\[dot\]|\{dot\})\s*|\s+dot\s+)"
     return re.escape(m.group(1)) + at + dot.join(re.escape(p) for p in m.group(2).split("."))
 
@@ -526,7 +528,7 @@ def _person_pattern(value: str) -> str:
 def _run_together_pattern(value: str) -> str | None:
     """A value of two or more words written with its words run together: joined by nothing or by up to three of
     the separators in ``_SEP`` or underscores ("JaneDoe", "janedoe", "jane.doe", "jane_doe", "jane - doe"), never
-    inside a longer word. Wrapped in the named group ``_JOINED`` so a match can tell it came from this form.
+    inside a longer word.
 
     The words are cut on those joiners and on commas, so no word contains a joiner: between two words the only
     choice is how many joiners (0-3) to take before the next word's literal first character, which is not a
@@ -537,8 +539,7 @@ def _run_together_pattern(value: str) -> str | None:
     words = [w for w in _WORD_SPLIT.split(value) if w]
     if len(words) < 2:
         return None
-    return (f"(?P<{_JOINED}>" + r"(?<![A-Za-z0-9])" + _JOIN.join(re.escape(w) for w in words)
-            + r"(?![A-Za-z0-9]))")
+    return r"(?<![A-Za-z0-9])" + _JOIN.join(re.escape(w) for w in words) + r"(?![A-Za-z0-9])"
 
 
 def term_pattern(kind: str, value: str) -> str:
@@ -607,31 +608,47 @@ class PrivateTerms:
             log.warning("private terms file %s unreadable: %s", self.path, exc)
 
     def spans(self, text: str) -> list[tuple[int, int, str, str]]:
-        """(start, end, kind, value). The value is the term as saved, except for a run-together match
-        ("zqxasynthname" for "Zqxa Synthname"): that one reports the text exactly as written, so it gets its own
-        vault entry and its placeholder restores those very characters (a path, handle or file name must come back
-        unchanged when the placeholder is reused in a command)."""
+        """(start, end, kind, value). The value is the text exactly as written ("Example, Jane", "zqxasynthname",
+        "4400-1234-5678"), not the term as saved: each written form gets its own vault entry, so its placeholder
+        restores those very characters (a path, handle, file name or number must come back unchanged when the
+        placeholder is reused in a command). ``saved_form`` names the term a written form belongs to."""
         self.reload()
-        out = []
-        for kind, pat, value in self.items:
-            for m in pat.finditer(text):
-                written = m.groupdict().get(_JOINED)
-                out.append((m.start(), m.end(), kind, written if written is not None else value))
-        return out
+        return [(m.start(), m.end(), kind, m.group(0)) for kind, pat, _value in self.items for m in pat.finditer(text)]
+
+    def saved_form(self, kind: str, written: str) -> str | None:
+        """The term of ``kind`` that ``written``, as a whole, is a way of writing; None if it is none of them."""
+        self.reload()
+        for k, pat, value in self.items:
+            if k == kind and pat.fullmatch(written):
+                return value
+        return None
 
 
 # --------------------------------------------------------------------------- vault
 
 
 class Vault:
-    """Session-scoped placeholder <-> value map, persisted 0600."""
+    """Session-scoped placeholder <-> value map, persisted 0600.
+
+    A value is kept exactly as it was written, so its placeholder restores the characters it replaced. The written
+    forms of one private term share the term's number: the first form seen is ``[PERSON-1]``, the next
+    ``[PERSON-1.2]``, then ``[PERSON-1.3]``, and each record names its term under ``"term"``. ``counts`` counts
+    values, not their forms."""
 
     def __init__(self, path: Path):
         self.path = path
         self.by_placeholder: dict[str, dict] = {}
         self.by_value: dict[str, str] = {}
         self.counters: dict[str, int] = {}
+        self.firsts: dict[tuple[str, str], str] = {}  # (kind, term) -> the placeholder of its first written form
+        self.forms: dict[str, int] = {}  # a first form's placeholder -> how many forms share its number
         self._load()
+
+    @staticmethod
+    def base_of(ph: str) -> str:
+        """``[PERSON-1]`` for ``[PERSON-1.2]``; any other placeholder unchanged."""
+        m = PLACEHOLDER_RE.fullmatch(ph)
+        return f"[{m.group('kind')}-{m.group('n')}]" if m else ph
 
     def _load(self) -> None:
         if not self.path.is_file():
@@ -647,6 +664,20 @@ class Vault:
             if m:
                 k, n = m.group("kind"), int(m.group("n"))
                 self.counters[k] = max(self.counters.get(k, 0), n)
+                base = self.base_of(ph)
+                self.forms[base] = max(self.forms.get(base, 1), int(m.group("form") or 1))
+                if rec.get("term") and not m.group("form"):
+                    self.firsts[(rec["kind"], rec["term"])] = ph
+
+    def _first(self, kind: str, term: str) -> str | None:
+        """The placeholder that ``term``'s written forms number from. A vault written before forms were numbered
+        holds the term's saved value without a ``"term"`` note: that entry is adopted."""
+        ph = self.firsts.get((kind, term))
+        if ph is None:
+            old = self.by_value.get(term)
+            if old and old == self.base_of(old) and self.by_placeholder[old]["kind"] == kind:
+                ph = self.firsts[(kind, term)] = old
+        return ph
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,16 +690,25 @@ class Vault:
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
 
-    def placeholder_for(self, kind: str, value: str) -> str:
+    def placeholder_for(self, kind: str, value: str, term: str | None = None) -> str:
+        """The placeholder for ``value`` as written. ``term``: the private term it is a written form of, whose
+        number it then shares (``PrivateTerms.saved_form``)."""
         value = value.strip()
         ph = self.by_value.get(value)
         if ph:
             return ph
         kind = kind.upper() if kind.upper() in KINDS else "PII"
-        n = self.counters.get(kind, 0) + 1
-        self.counters[kind] = n
-        ph = f"[{kind}-{n}]"
-        self.by_placeholder[ph] = {"kind": kind, "value": value}
+        first = self._first(kind, term) if term else None
+        if first:
+            self.forms[first] = self.forms.get(first, 1) + 1
+            ph = f"{first[:-1]}.{self.forms[first]}]"
+        else:
+            n = self.counters.get(kind, 0) + 1
+            self.counters[kind] = n
+            ph = f"[{kind}-{n}]"
+            if term:
+                self.firsts[(kind, term)] = ph
+        self.by_placeholder[ph] = {"kind": kind, "value": value, **({"term": term} if term else {})}
         self.by_value[value] = ph
         self._save()
         return ph
@@ -677,9 +717,11 @@ class Vault:
         return list(self.by_value.keys())
 
     def counts(self) -> dict[str, int]:
+        """Values per kind; the further written forms of a value (``[PERSON-1.2]``) are not counted again."""
         out: dict[str, int] = {}
-        for rec in self.by_placeholder.values():
-            out[rec["kind"]] = out.get(rec["kind"], 0) + 1
+        for ph, rec in self.by_placeholder.items():
+            if self.base_of(ph) == ph:
+                out[rec["kind"]] = out.get(rec["kind"], 0) + 1
         return out
 
     def rehydrate(self, text: str) -> str:
@@ -715,6 +757,14 @@ class Scrubber:
         self.terms = PrivateTerms.load(terms_path)
         self.strict = strict
         self.shapes = shapes
+
+    def placeholder(self, vault: Vault, kind: str, value: str) -> str:
+        """``vault``'s placeholder for ``value`` as written; a new written form of a private term takes that
+        term's number."""
+        ph = vault.by_value.get(value.strip())
+        if ph:
+            return ph
+        return vault.placeholder_for(kind, value, term=self.terms.saved_form(kind, value.strip()))
 
     def find_spans(self, text: str, *, secrets_only: bool = False,
                    policy: Policy | None = None) -> list[tuple[int, int, str, str]]:
@@ -766,20 +816,21 @@ class Scrubber:
                 kind = "PII"
             if value not in vault.by_value:
                 n += 1
-            vault.placeholder_for(kind, value)
+            self.placeholder(vault, kind, value)
         return n
 
     def register_material(self, text: str, vault: Vault, *, secrets_only: bool = False,
                           policy: Policy | None = None) -> dict[str, int]:
         """Assign placeholders for everything detectable in incoming material; returns
-        distinct values found per kind (the disclosure lifecycle keys off this)."""
+        distinct values found per kind, a value's several written forms counted once
+        (the disclosure lifecycle keys off this)."""
         counts: dict[str, int] = {}
         seen: set[str] = set()
         for _s, _e, kind, value in self.find_spans(text, secrets_only=secrets_only, policy=policy):
-            if value in seen:
+            first = vault.base_of(self.placeholder(vault, kind, value))
+            if first in seen:
                 continue
-            seen.add(value)
-            vault.placeholder_for(kind, value)
+            seen.add(first)
             counts[kind] = counts.get(kind, 0) + 1
         return counts
 
@@ -818,7 +869,7 @@ class Scrubber:
             if s < pos:
                 continue
             out.append(text[pos:s])
-            ph = vault.placeholder_for(kind, value)
+            ph = self.placeholder(vault, kind, value)
             out.append(ph)
             replaced += 1
             kinds[kind] = kinds.get(kind, 0) + 1

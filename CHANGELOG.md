@@ -4,6 +4,31 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Fixed — a placeholder restores a private term exactly as it was written
+- Every match of a private term now restores the text it replaced, not the term as saved. Before, only a run-together
+  match did (#10): `Example, Robin`, `ROBIN EXAMPLE`, `Robin J. Example`, a double space or a line break all came
+  back as `Robin Example`; an abbreviated address as the full saved address; `001 555 010 0222` as `555-010-0222`;
+  `4400-1234-5678` and `440012345678` as `4400 1234 5678`; `name at example dot org` as `name@example.org`. Rehydrated
+  text runs in the shell, so a reused placeholder changed the command: `grep -c '4400-1234-5678' ledger.csv`
+  counted 0 instead of 1, `printf '<%s>' ACCT=4400-1234-5678` split into three arguments, and `wc -l Example,Robin`
+  read a different file, `Robin`. Tests now run those commands through the server's own shell runner.
+- The written forms of one term share its number: the first form seen is `[PERSON-1]`, the next spelling
+  `[PERSON-1.2]`, then `[PERSON-1.3]`. A run-together form, which #10 numbered as a new value (`[PERSON-2]`), is now
+  `[PERSON-1.n]`, so the next person is `[PERSON-2]` again. Disclosure counts and `local_llm_status` count values,
+  not spellings: a name inside an e-mail address still registers as that person (#10), but together with the same
+  name written elsewhere it counts as one `PERSON`, not two. The worker is told that `[PERSON-1.2]` is another
+  spelling of `[PERSON-1]` and to copy a placeholder exactly, suffix included; the caller's instructions, which are
+  capped at 2040 characters, replace "one per spelling" with that pair as the example. The placeholder pattern (`scrub.PLACEHOLDER_RE`)
+  accepts the suffix, and so does the admin onboarding page's highlighter.
+- A vault written before this change loads unchanged; a new spelling of a term whose saved value it holds takes
+  that value's number.
+- A phone term saved with a country code no longer starts a match on a separator before the number
+  (`office 44 20 7946 0958` matched ` 44 …` with the leading space, and lost the space on the way back).
+- Linear time: the e-mail term pattern let a whitespace run after the local part be split two ways (`\s*` around
+  `\s+at\s+`), which was quadratic: measured 0.29 s at 5 KB, 1.15 s at 10 KB, 4.6 s at 20 KB, so about three hours at
+  1 MB by extrapolation. It is now linear. A test times term matching and rehydration on thirteen 1 MB adversarial
+  texts covering every format, and requires 1 MB to cost under 3× what 0.5 MB does.
+
 ### Changed — price table refreshed from the providers' own pages (2026-10-13)
 - `prices.json` re-read from every provider's current pricing page, 34 → 57 rows, all dated 2026-10-13. Value
   changes: OpenAI now publishes cache-write prices for the astra/sol/terra/luna line; Kimi K3 publishes a cache-write

@@ -221,7 +221,7 @@ $('#save').onclick=async()=>{const accept=[...Object.values(CHOICE).filter(c=>c.
   catch(e){toast(e.message,true);dirty();}};
 $('#forget').onclick=async()=>{if(!confirm('Forget every rejected suggestion? They may be suggested again.'))return;try{const r=await api('DELETE','/api/terms/rejections');toast(`Forgot ${r.forgotten}`);await refresh();}catch(e){toast(e.message,true);}};
 $('#try-go').onclick=async()=>{const text=$('#try-in').value;if(!text.trim())return;try{const r=await api('POST','/api/scrub-test',{text,mode:'pii'});
-  const out=$('#try-out');out.replaceChildren();let last=0;const re=/\[[A-Z]+-\d+\]/g;let m;const s=r.scrubbed;
+  const out=$('#try-out');out.replaceChildren();let last=0;const re=/\[[A-Z]+-\d+(?:\.\d+)?\]/g;let m;const s=r.scrubbed;
   while((m=re.exec(s))){out.append(s.slice(last,m.index),el('span',{class:'ph'},m[0]));last=m.index+m[0].length;}out.append(s.slice(last));
   $('#try-meta').textContent=`${r.replaced} replaced`+(r.kinds?' · '+Object.entries(r.kinds).map(([k,n])=>`${k} ${n}`).join(', '):'');}catch(e){toast(e.message,true);}};
 load();
