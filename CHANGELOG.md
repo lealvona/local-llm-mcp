@@ -4,6 +4,13 @@ All notable changes to local-llm-mcp. Dates are the day the change was pushed.
 
 ## Unreleased
 
+### Fixed — the git gate refuses a LAN host written by its last octet
+- `tools/publiccheck.py` has a new shape check, `short host address`: a dot and two or three digits written the way
+  prose names a host (after whitespace, an opening bracket or quote, or the start of a line; a port or a possessive may
+  follow). Before, a commit message or file that named a host this way passed every check, because only full addresses
+  had a shape check. Decimals and CSS alphas, versions, file names and full addresses do not match. The new check found
+  nothing in this repository's tree or history when it was added. Opt a line out with `public:allow short host address`.
+
 ### Fixed — a placeholder restores a private term exactly as it was written
 - Every match of a private term now restores the text it replaced, not the term as saved. Before, only a run-together
   match did (#10): `Example, Robin`, `ROBIN EXAMPLE`, `Robin J. Example`, a double space or a line break all came
