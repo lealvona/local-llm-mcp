@@ -108,6 +108,7 @@ def test_message_with_term_address_or_attribution_is_refused(repo):
     g("add", "b.py")
     for msg, expect in [("tested on host-zebra", "denylist term #3"),
                         ("see /home/someone/notes", "home directory path"),  # public:allow: synthetic fixture
+                        ("full suite passed on .142", "short host address"),  # public:allow short host address
                         ("add b\n\nCo-Authored-By: Robot <robot@example.org>", "attribution trailer"),
                         ("add b\n\n🤖 Generated with Something", "attribution trailer")]:
         r = g("commit", "-q", "-m", msg, check=False)
@@ -207,6 +208,29 @@ def test_new_shapes_are_refused_and_rfc_ranges_are_not(repo):
     assert r.returncode != 0
     for name, (_, should_flag) in cases.items():
         assert (name in r.stderr) == should_flag, f"{name}: expected flagged={should_flag}\n{r.stderr}"
+
+
+def test_a_host_written_by_its_last_octet_is_refused_and_decimals_are_not(repo):
+    """A short LAN host reference passed every check before; it names one network as surely as the full address."""
+    work, g = repo
+    flagged = ["ran it on .142 today", "see (.142)", "`.142`", ".142:8000 answers", "the .142's venv",  # public:allow short host address
+               "\t.42 and", "'.142'"]  # public:allow short host address
+    clean = ["rgba(0,0,0,.25)", "re.compile(r'\\.\\d{1,3}')", "v0.142", "1.142", "x.142", "a/.142", "0.5", "-.25em",
+             "2.5 .5", ".1 s", "file.142.txt", ".142abc"]
+    for i, body in enumerate(flagged):
+        (work / f"f{i}.md").write_text(body + "\n")
+    for i, body in enumerate(clean):
+        (work / f"c{i}.md").write_text(body + "\n")
+    (work / "allowed.md").write_text("quoted on purpose: .142  public:allow short host address\n")  # public:allow short host address
+    g("add", "-A")
+    r = g("commit", "-q", "-m", "probes", check=False)
+    assert r.returncode != 0
+    for i, body in enumerate(flagged):
+        assert f"staged f{i}.md:1: short host address" in r.stderr, (body, r.stderr)
+    for i, body in enumerate(clean):
+        assert f"c{i}.md" not in r.stderr, (body, r.stderr)
+    assert "allowed.md" not in r.stderr
+    assert ".142" not in r.stderr  # public:allow short host address
 
 
 def test_a_denylist_term_can_never_be_opted_out(repo):

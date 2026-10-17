@@ -1,7 +1,7 @@
 """Refuse anything that belongs to ONE deployment or ONE person rather than to the code.
 
-The general code must contain nothing about a particular network or operator: no network addresses,
-no home-directory paths, no non-example email addresses, no tailnet names, and none of the terms in
+The general code must contain nothing about a particular network or operator: no network addresses
+(a host written by its last octet alone included), no home-directory paths, no non-example email addresses, no tailnet names, and none of the terms in
 an operator's private denylist (a local file the repository never sees). Deployment specifics belong
 in a separate instance — see the README's "Keeping a deployment separate from the code".
 
@@ -42,6 +42,11 @@ CHECKS = [
     ("private IPv4 address", re.compile(
         r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
         r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b")),
+    # A LAN host written by its last octet, as prose does: a dot and two or three digits after whitespace, an opening
+    # bracket or quote, or the start of a line, and not followed by a word character, dot, dash or slash. A port or a
+    # possessive may follow. Decimals and CSS alphas (after a digit or a comma), versions and full addresses are not
+    # this shape (tests/test_publiccheck.py has the controls).
+    ("short host address", re.compile(r"(?<![^\s(\[`\"'])\.\d{2,3}(?![\w.\-/])")),
     ("public IPv4 address", re.compile(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3})(?![\w.])")),
     ("IPv6 address", re.compile(r"(?<![\w:])(?:fd[0-9a-f]{2}:[0-9a-f:]{2,}|fe80:[0-9a-f:]{2,})(?![\w:])", re.I)),
     ("home directory path", re.compile(r"(?<![A-Za-z0-9_])(?:/home/[A-Za-z][\w.-]*|/Users/[A-Za-z][\w.-]*|/root(?![\w.-])"  # public:allow home directory path
